@@ -1,0 +1,16 @@
+{
+  "name": "Live Line Tactical Voice",
+  "short_name": "Live Line",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0f0420",
+  "theme_color": "#0f0420",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/3114/3114320.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

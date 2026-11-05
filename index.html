@@ -1,0 +1,1263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <script>
+    // Fires the camera/mic request in the very first possible tick - before the Firebase-based
+    // app script further down has even started downloading its (large, network-fetched) ES module
+    // dependencies. That module script cannot execute a single line, including its own
+    // getUserMedia() call, until those imports resolve, so acquiring the camera here instead means
+    // the permission prompt / hardware warm-up starts milliseconds after the link is opened rather
+    // than after Firebase has loaded.
+    (function () {
+      window.__QUALITY_PROFILES = {
+        low:    { width: 480,  height: 360, frameRate: 15, maxBitrate: 350000,  audioSampleRate: 24000 },
+        medium: { width: 960,  height: 540, frameRate: 20, maxBitrate: 1200000, audioSampleRate: 48000 },
+        high:   { width: 1280, height: 720, frameRate: 24, maxBitrate: 3000000, audioSampleRate: 48000 }
+      };
+
+      function detectDeviceTierEarly() {
+        var cores = navigator.hardwareConcurrency || 2;
+        var memory = navigator.deviceMemory || 4; // undefined on iOS/Firefox, assume mid-range
+        var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        var netType = conn ? conn.effectiveType : '4g';
+        var saveData = conn ? !!conn.saveData : false;
+
+        var score = 0;
+        if (cores >= 6) score += 2; else if (cores >= 4) score += 1;
+        if (memory >= 6) score += 2; else if (memory >= 4) score += 1;
+        if (netType === '4g') score += 1;
+        if (saveData || netType === '2g' || netType === 'slow-2g') score -= 2;
+
+        var tier = 'medium';
+        if (score <= 1) tier = 'low';
+        else if (score >= 4) tier = 'high';
+        return tier;
+      }
+
+      var tier = detectDeviceTierEarly();
+      var profile = window.__QUALITY_PROFILES[tier];
+      window.__earlyTier = tier;
+      window.__earlyProfile = profile;
+
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        window.__earlyMediaPromise = navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: profile.width }, height: { ideal: profile.height }, frameRate: { ideal: profile.frameRate, max: profile.frameRate } },
+          audio: { echoCancellation: true, noiseSuppression: true, sampleRate: profile.audioSampleRate }
+        }).catch(function () {
+          return navigator.mediaDevices.getUserMedia({
+            video: false,
+            audio: { echoCancellation: true, noiseSuppression: true, sampleRate: profile.audioSampleRate }
+          });
+        }).catch(function () {
+          return null;
+        });
+      } else {
+        window.__earlyMediaPromise = Promise.resolve(null);
+      }
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Live Line - Tactical A/V</title>
+  
+  <link rel="manifest" href="./manifest.json">
+  <meta name="theme-color" content="#000432">
+  <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3114/3114320.png">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #000432;
+      --text: #ffffff;
+      --border: rgba(255, 255, 255, 0.25);
+      --border-dim: rgba(255, 255, 255, 0.1);
+      --highlight: rgba(255, 255, 255, 0.1);
+      --muted: rgba(255, 255, 255, 0.5);
+    }
+
+    body {
+          font-family: 'IBM Plex Sans', sans-serif;
+          background: var(--bg);
+          color: var(--text);
+          height: 100vh;
+          margin: 0;
+          padding: 0;
+          touch-action: manipulation;
+          overflow: hidden;
+        }
+    
+        #bgCanvas {
+          position: fixed;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          z-index: 0;
+          display: block;
+          opacity: 0.7;
+        }
+    
+        .app {
+                  position: fixed;
+                  bottom: 0;
+                  left: 0;
+                  z-index: 10;
+                  width: 100vw;
+                  height: 5vh;
+                  min-height: 54px;
+                  overflow-x: auto;
+                  overflow-y: hidden;
+                  background: rgba(0, 4, 50, 0.85);
+                  border-top: 1px solid var(--border);
+                  backdrop-filter: blur(8px);
+                }
+                .app::-webkit-scrollbar { height: 6px; }
+                .app::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); }
+                
+                .header { display: flex; align-items: center; gap: 1rem; padding: 0; flex-shrink: 0; }
+                .logo { display: flex; align-items: center; gap: 0.5rem; margin: 0; }
+                .logo-icon { width: 28px; height: 28px; background: rgba(0, 4, 50, 0.8); border: 2px solid var(--text); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+                        .logo-icon svg { color: var(--text); width: 14px; height: 14px; }
+                        h1 { font-family: 'IBM Plex Mono', monospace; font-size: 1.1rem; font-weight: 600; letter-spacing: 0.1em; margin: 0; }
+                        
+                        .big-id-input {
+                          background: rgba(0, 4, 50, 0.8);
+                          border: none;
+                          border-bottom: 2px dashed var(--muted);
+                          color: var(--text);
+                          font-family: 'IBM Plex Mono', monospace;
+                          font-size: 1.2rem;
+                          font-weight: 600;
+                          text-align: center;
+                          width: 60px;
+                          margin: 0;
+                          padding: 0.1rem;
+                          outline: none;
+                          text-transform: uppercase;
+                        }
+                        .big-id-input:focus { border-bottom-color: var(--text); }
+                        .big-id-input::placeholder { color: var(--muted); font-size: 1rem; }
+                        
+                        .card { background: transparent; border: none; padding: 0; box-shadow: none; display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; height: 100%; }
+                        .card-label { display: none; }
+                        
+                        .status-bar { background: transparent; border: 1px solid var(--border); padding: 0 0.75rem; display: flex; align-items: center; gap: 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; flex-shrink: 0; height: 36px; border-radius: 4px; }
+                        .status-dot { width: 8px; height: 8px; background: transparent; border: 1px solid var(--muted); flex-shrink: 0; border-radius: 50%; }
+                        .status-dot.connected { background: var(--text); border-color: var(--text); }
+                        .status-dot.error { background: transparent; border: 1px dashed var(--muted); }
+                        .status-dot.speaking { animation: pulseSpeak 0.8s ease-in-out infinite; }
+                        @keyframes pulseSpeak { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(1.2); } }
+                        
+                        .btn { background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid var(--text); padding: 0 0.75rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; font-weight: 600; cursor: pointer; letter-spacing: 0.05em; width: auto; height: 36px; transition: all 0.2s ease; text-transform: uppercase; margin: 0; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+                .btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
+                .btn:active:not(:disabled) { transform: translateY(1px); }
+                .btn:disabled { background: transparent; color: var(--muted); border-color: var(--border-dim); cursor: not-allowed; }
+                
+                #acceptCallBtn { background: var(--text); color: var(--bg); font-size: 1rem; display: none; box-shadow: 0 0 15px rgba(255,255,255,0.4); animation: pulseButton 1s infinite alternate; }
+                #cutCallBtn { background: rgba(255,68,68,0.2); color: #ff4444; font-size: 1rem; display: none; border-color: #ff4444; }
+                #cutCallBtn:hover { background: #ff4444; color: white; }
+                
+                /* 95% Top Video Layout */
+                        .fullscreen-video-container { position: fixed; top: 0; left: 0; z-index: 1; width: 100vw; height: 95vh; height: calc(100vh - max(5vh, 54px)); background: #000; }
+                        .video-grid { display: flex; flex-wrap: wrap; width: 100%; height: 100%; gap: 0; align-content: flex-start; }
+                .video-wrapper { position: relative; border: 1px solid rgba(0,4,50,0.5); background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; transition: width 0.3s ease, height 0.3s ease; }
+                .video-wrapper.active { border-color: var(--text); }
+                .video-wrapper video { width: 100%; height: 100%; object-fit: cover; }
+                .video-wrapper video.mirrored { transform: scaleX(-1); }
+                .video-label { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,0.6); border: 1px solid var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; padding: 4px 8px; color: var(--text); z-index: 2; backdrop-filter: blur(2px); text-transform: uppercase; }
+        
+            .members-list { list-style: none; padding: 0; margin: 0; display: flex; align-items: center; gap: 0.75rem; }
+                    .members-list li { display: flex; align-items: center; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; background: rgba(255,255,255,0.05); border: 1px solid var(--border-dim); padding: 0 0.75rem; height: 36px; border-radius: 4px; white-space: nowrap; margin-bottom: 0; }
+                    .member-name { display: flex; align-items: center; gap: 8px; text-transform: uppercase; }
+                    
+                    .buzz-member-btn { background: transparent; border: 1px solid var(--text); color: var(--text); padding: 0 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; font-weight: 600; cursor: pointer; margin-left: 5px; height: 24px; transition: all 0.15s ease; border-radius: 2px; margin-bottom: 0; }
+                    .buzz-member-btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
+                    .buzz-member-btn:disabled { opacity: 0.3; cursor: not-allowed; border-color: var(--border); color: var(--muted); }
+                    
+                    body.incoming-buzz { animation: buzzFlash 1s ease-in-out infinite; }
+                    @keyframes buzzFlash { 0%, 100% { background: var(--bg); } 50% { background: var(--text); color: var(--bg); } }
+                    
+                    .buzz-toast { position: fixed; top: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--text); color: var(--bg); border: none; padding: 1rem 1.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.9rem; font-weight: 600; display: none; align-items: center; text-transform: uppercase; }
+                    .buzz-toast.show { display: flex; }
+            
+                    .waveform { display: none; align-items: center; justify-content: center; gap: 4px; height: 36px; margin: 0 0.5rem; }
+    .waveform.active { display: flex; }
+    .waveform span { display: block; width: 4px; background: var(--text); animation: wave 1.2s ease-in-out infinite; }
+    .waveform span:nth-child(1) { height: 10px; animation-delay: 0s; }
+    .waveform span:nth-child(2) { height: 22px; animation-delay: 0.1s; }
+    .waveform span:nth-child(3) { height: 32px; animation-delay: 0.2s; }
+    .waveform span:nth-child(4) { height: 22px; animation-delay: 0.3s; }
+    .waveform span:nth-child(5) { height: 12px; animation-delay: 0.4s; }
+
+    @keyframes wave {
+      0%, 100% { transform: scaleY(0.4); opacity: 0.5; }
+      50% { transform: scaleY(1); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+
+  <canvas id="bgCanvas"></canvas>
+
+  <!-- Full Screen Video Grid Layer -->
+    <div id="videoCard" class="fullscreen-video-container" style="display: none;">
+      <div class="video-grid" id="videoGrid">
+        <div class="video-wrapper" id="localVideoWrapper">
+          <video id="localVideo" class="mirrored" autoplay playsinline muted></video>
+          <div class="video-label">SELF</div>
+        </div>
+      </div>
+    </div>
+  
+    <div class="app">
+          <div id="channelScreen" style="display: flex; flex-direction: row; gap: 1.5rem; align-items: center; height: 100%; width: max-content; padding: 0 1.5rem; margin: 0 auto;">
+                  <div class="header">
+                    <input type="text" id="myIdInput" class="big-id-input" placeholder="INIT...">
+                  </div>
+          
+                  <div class="status-bar" id="statusBar" title="Connection Status">
+                    <div class="status-dot connected"></div>
+                    <span id="statusText" style="display: none;">CONNECTING...</span>
+                  </div>
+          
+                  <!-- Controls Card -->
+                  <div class="card">
+                    <div class="waveform" id="waveform">
+                      <span></span><span></span><span></span><span></span><span></span>
+                    </div>
+                    <button id="acceptCallBtn" class="btn">ACCEPT</button>
+                    <button id="cutCallBtn" class="btn">MUTE</button>
+                    <button id="buzzAllBtn" class="btn" title="GLOBAL BUZZ" style="padding: 0 1rem; display: none;">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 17H2c0-1.5 1.5-2.5 1.5-2.5V10a8.5 8.5 0 0 1 17 0v4.5S22 15.5 22 17z"></path>
+                        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+                      </svg>
+                    </button>
+                  </div>
+            
+            <!-- Network Presence Card -->
+            <div class="card">
+              <ul class="members-list" id="membersList"></ul>
+            </div>
+          </div>
+        </div>
+
+  <div id="buzzToast" class="buzz-toast">
+    <span id="buzzToastText">BUZZ</span>
+  </div>
+
+  <!-- Background Canvas Logic -->
+  <script>
+    (function () {
+      const canvas = document.getElementById('bgCanvas');
+      const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+      if (!gl) { canvas.style.display = 'none'; return; }
+      const vsSource = `attribute vec2 aPosition; attribute float aSize; attribute float aAlpha; varying float vAlpha; uniform vec2 uResolution; void main() { vec2 clipSpace = (aPosition / uResolution) * 2.0 - 1.0; gl_Position = vec4(clipSpace * vec2(1.0, -1.0), 0.0, 1.0); gl_PointSize = aSize; vAlpha = aAlpha; }`;
+      const fsSource = `precision mediump float; varying float vAlpha; uniform vec3 uColor; void main() { vec2 coord = gl_PointCoord - vec2(0.5); float dist = length(coord); float circle = smoothstep(0.5, 0.0, dist); gl_FragColor = vec4(uColor, vAlpha * circle); }`;
+      const lineVsSource = `attribute vec2 aPosition; attribute float aAlpha; varying float vAlpha; uniform vec2 uResolution; void main() { vec2 clipSpace = (aPosition / uResolution) * 2.0 - 1.0; gl_Position = vec4(clipSpace * vec2(1.0, -1.0), 0.0, 1.0); vAlpha = aAlpha; }`;
+      const lineFsSource = `precision mediump float; varying float vAlpha; uniform vec3 uColor; void main() { gl_FragColor = vec4(uColor, vAlpha); }`;
+      function compileShader(gl, type, source) { const shader = gl.createShader(type); gl.shaderSource(shader, source); gl.compileShader(shader); return gl.getShaderParameter(shader, gl.COMPILE_STATUS) ? shader : null; }
+      function createProgram(gl, vsSource, fsSource) { const vs = compileShader(gl, gl.VERTEX_SHADER, vsSource); const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSource); const program = gl.createProgram(); gl.attachShader(program, vs); gl.attachShader(program, fs); gl.linkProgram(program); return program; }
+      const pointProgram = createProgram(gl, vsSource, fsSource), lineProgram = createProgram(gl, lineVsSource, lineFsSource);
+      let width, height; function resize() { width = canvas.clientWidth = window.innerWidth; height = canvas.clientHeight = window.innerHeight; canvas.width = width * (window.devicePixelRatio || 1); canvas.height = height * (window.devicePixelRatio || 1); gl.viewport(0, 0, canvas.width, canvas.height); }
+      window.addEventListener('resize', resize); resize();
+      const NODE_COUNT = Math.min(70, Math.floor((window.innerWidth * window.innerHeight) / 14000)), LINK_DIST = 140, nodes = [];
+      for (let i = 0; i < NODE_COUNT; i++) nodes.push({ x: Math.random() * width, y: Math.random() * height, vx: (Math.random() - 0.5) * 0.25, vy: (Math.random() - 0.5) * 0.25, size: 2 + Math.random() * 2.5, alpha: 0.3 + Math.random() * 0.3 });
+      
+      const colorAccent = [1.0, 1.0, 1.0], pointPosBuffer = gl.createBuffer(), pointSizeBuffer = gl.createBuffer(), pointAlphaBuffer = gl.createBuffer(), linePosBuffer = gl.createBuffer(), lineAlphaBuffer = gl.createBuffer();
+      const pointAttribs = { aPosition: gl.getAttribLocation(pointProgram, 'aPosition'), aSize: gl.getAttribLocation(pointProgram, 'aSize'), aAlpha: gl.getAttribLocation(pointProgram, 'aAlpha') }, pointUniforms = { uResolution: gl.getUniformLocation(pointProgram, 'uResolution'), uColor: gl.getUniformLocation(pointProgram, 'uColor') }, lineAttribs = { aPosition: gl.getAttribLocation(lineProgram, 'aPosition'), aAlpha: gl.getAttribLocation(lineProgram, 'aAlpha') }, lineUniforms = { uResolution: gl.getUniformLocation(lineProgram, 'uResolution'), uColor: gl.getUniformLocation(lineProgram, 'uColor') };
+      function update() { for (const n of nodes) { n.x += n.vx; n.y += n.vy; if (n.x < 0 || n.x > width) n.vx *= -1; if (n.y < 0 || n.y > height) n.vy *= -1; n.x = Math.max(0, Math.min(width, n.x)); n.y = Math.max(0, Math.min(height, n.y)); } }
+      function render() { gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); const linePositions = [], lineAlphas = []; for (let i = 0; i < nodes.length; i++) { for (let j = i + 1; j < nodes.length; j++) { const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y, dist = Math.sqrt(dx * dx + dy * dy); if (dist < LINK_DIST) { const a = (1 - dist / LINK_DIST) * 0.25; linePositions.push(nodes[i].x, nodes[i].y, nodes[j].x, nodes[j].y); lineAlphas.push(a, a); } } }
+        if (linePositions.length > 0) { gl.useProgram(lineProgram); gl.uniform2f(lineUniforms.uResolution, width, height); gl.uniform3fv(lineUniforms.uColor, colorAccent); gl.bindBuffer(gl.ARRAY_BUFFER, linePosBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(linePositions), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(lineAttribs.aPosition); gl.vertexAttribPointer(lineAttribs.aPosition, 2, gl.FLOAT, false, 0, 0); gl.bindBuffer(gl.ARRAY_BUFFER, lineAlphaBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lineAlphas), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(lineAttribs.aAlpha); gl.vertexAttribPointer(lineAttribs.aAlpha, 1, gl.FLOAT, false, 0, 0); gl.drawArrays(gl.LINES, 0, linePositions.length / 2); }
+        const pointPositions = [], pointSizes = [], pointAlphas = []; for (const n of nodes) { pointPositions.push(n.x, n.y); pointSizes.push(n.size * (window.devicePixelRatio || 1)); pointAlphas.push(n.alpha); }
+        gl.useProgram(pointProgram); gl.uniform2f(pointUniforms.uResolution, width, height); gl.uniform3fv(pointUniforms.uColor, colorAccent); gl.bindBuffer(gl.ARRAY_BUFFER, pointPosBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pointPositions), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(pointAttribs.aPosition); gl.vertexAttribPointer(pointAttribs.aPosition, 2, gl.FLOAT, false, 0, 0); gl.bindBuffer(gl.ARRAY_BUFFER, pointSizeBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pointSizes), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(pointAttribs.aAlpha); gl.vertexAttribPointer(pointAttribs.aAlpha, 1, gl.FLOAT, false, 0, 0); gl.drawArrays(gl.POINTS, 0, nodes.length); }
+      function loop() { update(); render(); requestAnimationFrame(loop); } loop();
+    })();
+  </script>
+
+  <!-- Core App Logic -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
+    import { getFirestore, collection, doc, setDoc, onSnapshot, addDoc, deleteDoc, query, where, getDoc, getDocs } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyCX-bZLDHy-6wxuc5b8YInV_Mr7uYOTmgk",
+      authDomain: "trinity-os-8edd0.firebaseapp.com",
+      databaseURL: "https://trinity-os-8edd0-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "trinity-os-8edd0",
+      storageBucket: "trinity-os-8edd0.firebasestorage.app",
+      messagingSenderId: "692349337854",
+      appId: "1:692349337854:web:ef24ead6e7362a5772a5af"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    const GLITCH_WORKER_URL = "https://ptt-backend-zi8u.onrender.com"; 
+    const VAPID_PUBLIC_KEY = "BCPTdBcEXkGuQTtLehEmXp7KkN5jqhAyp4VbL7GZn1ixXAyt_AOXq6qAzzSJO8BM47YnfdGmLc990m0P3ER_2RA";
+
+    function urlBase64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - base64String.length % 4) % 4);
+      const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const rawData = atob(base64);
+      const outputArray = new Uint8Array(rawData.length);
+      for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+      return outputArray;
+    }
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch((e) => console.log('SW Registration failed', e));
+    }
+
+    const servers = { iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] };
+    
+        // ---- Adaptive Quality: device capability detection ----
+        const QUALITY_PROFILES = {
+          low:    { width: 480,  height: 360, frameRate: 15, maxBitrate: 350000,  audioSampleRate: 24000 },
+          medium: { width: 960,  height: 540, frameRate: 20, maxBitrate: 1200000, audioSampleRate: 48000 },
+          high:   { width: 1280, height: 720, frameRate: 24, maxBitrate: 3000000, audioSampleRate: 48000 }
+        };
+        let currentTier = 'medium';
+        let currentProfile = QUALITY_PROFILES.medium;
+    
+        function measureScreenRefreshRate() {
+          return new Promise((resolve) => {
+            let frames = 0;
+            const start = performance.now();
+            function tick(now) {
+              frames++;
+              if (now - start < 400) {
+                requestAnimationFrame(tick);
+              } else {
+                resolve(Math.round((frames * 1000) / (now - start)));
+              }
+            }
+            requestAnimationFrame(tick);
+          });
+        }
+    
+        function detectDeviceTier() {
+                  const cores = navigator.hardwareConcurrency || 2;
+                  const memory = navigator.deviceMemory || 4; // undefined on iOS/Firefox, assume mid-range
+                  const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+                  const netType = conn ? conn.effectiveType : '4g';
+                  const saveData = conn ? !!conn.saveData : false;
+        
+                  let score = 0;
+                  if (cores >= 6) score += 2; else if (cores >= 4) score += 1;
+                  if (memory >= 6) score += 2; else if (memory >= 4) score += 1;
+                  if (netType === '4g') score += 1;
+                  if (saveData || netType === '2g' || netType === 'slow-2g') score -= 2;
+        
+                  let tier = 'medium';
+                  if (score <= 1) tier = 'low';
+                  else if (score >= 4) tier = 'high';
+        
+                  currentTier = tier;
+                  currentProfile = QUALITY_PROFILES[tier];
+                  return currentProfile;
+                }
+        
+                // Refine the tier in the background using the real screen refresh rate, without blocking
+                // camera acquisition. If the device turns out weaker than the instant guess assumed,
+                // tighten constraints on the track that is already streaming instead of waiting to start it.
+                async function refineDeviceTierInBackground() {
+                  const refreshRate = await measureScreenRefreshRate();
+                  if (refreshRate < 30 && currentTier !== 'low') {
+                    currentTier = 'low';
+                    currentProfile = QUALITY_PROFILES.low;
+                    const vTrack = localStream && localStream.getVideoTracks()[0];
+                    if (vTrack) {
+                      vTrack.applyConstraints({
+                        width: { ideal: currentProfile.width },
+                        height: { ideal: currentProfile.height },
+                        frameRate: { ideal: currentProfile.frameRate }
+                      }).catch(() => {});
+                    }
+                    Object.values(peers).forEach((p) => {
+                      p.getSenders().forEach((s) => { if (s.track && s.track.kind === 'video') applyBitrateToSender(s); });
+                    });
+                  }
+                }
+    
+        function applyDegradationPreference(pc) {
+          pc.getSenders().forEach((sender) => {
+            if (sender.track && sender.track.kind === 'video') {
+              try {
+                sender.setParameters(Object.assign({}, sender.getParameters(), {
+                  degradationPreference: currentTier === 'low' ? 'maintain-framerate' : 'balanced'
+                }));
+              } catch (e) {}
+            }
+          });
+        }
+    
+        function applyBitrateToSender(sender) {
+          try {
+            const params = sender.getParameters();
+            if (!params.encodings) params.encodings = [{}];
+            params.encodings[0].maxBitrate = currentProfile.maxBitrate;
+            sender.setParameters(params).catch(() => {});
+          } catch (e) {}
+        }
+    
+        // Live re-adaptation: watch actual outbound video fps and downgrade further if the device can't keep up
+        function startAdaptiveMonitor() {
+          setInterval(async () => {
+            for (const uid in peers) {
+              const pc = peers[uid];
+              if (!pc || pc.connectionState !== 'connected') continue;
+              try {
+                const stats = await pc.getStats();
+                stats.forEach((report) => {
+                  if (report.type === 'outbound-rtp' && report.kind === 'video' && report.framesPerSecond) {
+                    if (report.framesPerSecond < currentProfile.frameRate * 0.6 && currentTier !== 'low') {
+                      currentTier = currentTier === 'high' ? 'medium' : 'low';
+                      currentProfile = QUALITY_PROFILES[currentTier];
+                      const vTrack = localStream && localStream.getVideoTracks()[0];
+                      if (vTrack) {
+                        vTrack.applyConstraints({
+                          width: { ideal: currentProfile.width },
+                          height: { ideal: currentProfile.height },
+                          frameRate: { ideal: currentProfile.frameRate }
+                        }).catch(() => {});
+                      }
+                      Object.values(peers).forEach((p) => {
+                        p.getSenders().forEach((s) => { if (s.track && s.track.kind === 'video') applyBitrateToSender(s); });
+                      });
+                    }
+                  }
+                });
+              } catch (e) {}
+            }
+          }, 8000);
+        }
+
+    const myUid = localStorage.getItem('myUid') || Math.random().toString(36).substring(2, 10);
+    localStorage.setItem('myUid', myUid);
+    let myName = localStorage.getItem('myName') || "";
+
+    let localStream = null;
+        let keepAliveAudio = null;
+        const peers = {};
+        const candidateQueues = {};
+        const agentPresenceStates = {};
+        const reconnectAttempts = {};
+        const reconnectTimers = {};
+        const onlineUids = new Set();
+        const RECONNECT_BASE_MS = 1000;
+        const RECONNECT_MAX_MS = 30000;
+        const DISCONNECT_GRACE_MS = 5000;
+    
+        function cleanupPeer(uid) {
+          const wrapper = document.getElementById('video-wrapper-' + uid);
+          if (wrapper) {
+            wrapper.remove();
+            updateVideoGrid();
+          }
+          if (peers[uid]) {
+            if (peers[uid].connectionState !== 'closed') peers[uid].close();
+            delete peers[uid];
+          }
+        }
+    
+        function scheduleReconnect(targetUid) {
+          if (!onlineUids.has(targetUid)) return; // peer isn't present anymore - presence listener will handle it
+          if (reconnectTimers[targetUid]) return; // already scheduled
+          const attempt = (reconnectAttempts[targetUid] || 0) + 1;
+          reconnectAttempts[targetUid] = attempt;
+          const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt - 1), RECONNECT_MAX_MS);
+          reconnectTimers[targetUid] = setTimeout(() => {
+            delete reconnectTimers[targetUid];
+            if (myUid > targetUid && onlineUids.has(targetUid) && (!peers[targetUid] || peers[targetUid].connectionState === 'closed')) {
+              initiateCall(targetUid);
+            }
+          }, delay);
+        }
+
+    let isCommsLive = false; 
+        let hasJoined = false;
+        let hasMedia = false;
+        let ringingInterval = null; 
+        let videoDevices = [];
+            let currentDeviceIndex = 0;
+            let lastTapTime = 0;
+        
+            async function getVideoDevices() {
+              try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                videoDevices = devices.filter(function (d) { return d.kind === 'videoinput'; });
+              } catch (e) {
+                videoDevices = [];
+              }
+              return videoDevices;
+            } 
+    
+    const waveform = document.getElementById('waveform');
+    const acceptCallBtn = document.getElementById('acceptCallBtn');
+    const cutCallBtn = document.getElementById('cutCallBtn');
+    const statusText = document.getElementById('statusText');
+    const myIdInput = document.getElementById('myIdInput');
+    const videoCard = document.getElementById('videoCard');
+        const localVideo = document.getElementById('localVideo');
+    
+        // Dynamic Video Grid Calculator (Horizontal Split)
+                function updateVideoGrid() {
+                  const wrappers = document.querySelectorAll('.video-wrapper');
+                  const count = wrappers.length;
+                  if (count === 0) return;
+                  
+                  // Prioritize rows over columns to stack videos top-to-bottom
+                  const rows = Math.ceil(Math.sqrt(count));
+                  const cols = Math.ceil(count / rows);
+                  
+                  wrappers.forEach(w => {
+                    w.style.width = `${100 / cols}%`;
+                    w.style.height = `${100 / rows}%`;
+                  });
+                }
+        window.addEventListener('resize', updateVideoGrid);
+        
+            async function switchCamera() {
+                              if (!localStream) return;
+                              await getVideoDevices();
+                              if (videoDevices.length < 2) return; // Only one camera on this device - nothing to switch to
+            
+                              const oldVideoTrack = localStream.getVideoTracks()[0];
+                              const oldSettings = oldVideoTrack ? oldVideoTrack.getSettings() : {};
+                              let idx = videoDevices.findIndex(function (d) { return d.deviceId === oldSettings.deviceId; });
+                              if (idx === -1) idx = currentDeviceIndex;
+                              currentDeviceIndex = (idx + 1) % videoDevices.length;
+                              const nextDeviceId = videoDevices[currentDeviceIndex].deviceId;
+            
+                              const buildConstraints = function (deviceId) {
+                                return {
+                                  video: {
+                                    deviceId: { exact: deviceId },
+                                    width: { ideal: currentProfile.width },
+                                    height: { ideal: currentProfile.height },
+                                    frameRate: { ideal: currentProfile.frameRate, max: currentProfile.frameRate }
+                                  },
+                                  audio: false
+                                };
+                              };
+            
+                              let newStream;
+                              try {
+                                newStream = await navigator.mediaDevices.getUserMedia(buildConstraints(nextDeviceId));
+                              } catch (firstErr) {
+                                if (oldVideoTrack) {
+                                  localStream.removeTrack(oldVideoTrack);
+                                  oldVideoTrack.stop();
+                                }
+                                try {
+                                  newStream = await navigator.mediaDevices.getUserMedia(buildConstraints(nextDeviceId));
+                                } catch (secondErr) {
+                                  alert("CAMERA SWITCH FAILED.");
+                                  return;
+                                }
+                              }
+            
+                              const newVideoTrack = newStream.getVideoTracks()[0];
+                              if (!newVideoTrack) return;
+            
+                              Object.values(peers).forEach(function (pc) {
+                                const sender = pc.getSenders().find(function (s) { return s.track && s.track.kind === 'video'; });
+                                if (sender) sender.replaceTrack(newVideoTrack).catch(function () {});
+                              });
+            
+                              if (oldVideoTrack && localStream.getVideoTracks().indexOf(oldVideoTrack) !== -1) {
+                                localStream.removeTrack(oldVideoTrack);
+                                oldVideoTrack.stop();
+                              }
+                              localStream.addTrack(newVideoTrack);
+                              newVideoTrack.enabled = isCommsLive;
+                              localVideo.srcObject = localStream;
+            
+                              const newSettings = newVideoTrack.getSettings();
+                              if (newSettings.facingMode) {
+                                localVideo.classList.toggle('mirrored', newSettings.facingMode === 'user');
+                              } else {
+                                localVideo.classList.toggle('mirrored', currentDeviceIndex === 0);
+                              }
+                            }
+        
+            (function setupDoubleTapCameraSwitch() {
+                      const wrapperEl = document.getElementById('localVideoWrapper');
+                      if (!wrapperEl) return;
+                      let lastSwitchTime = 0;
+                      const SWITCH_GUARD_MS = 500; // prevents touchend + native dblclick both firing for one gesture
+            
+                      function triggerSwitch() {
+                        const now = Date.now();
+                        if (now - lastSwitchTime < SWITCH_GUARD_MS) return; // already handled by the other event type
+                        lastSwitchTime = now;
+                        switchCamera();
+                      }
+            
+                      wrapperEl.addEventListener('touchend', function (e) {
+                        const now = Date.now();
+                        if (now - lastTapTime < 300) {
+                          e.preventDefault();
+                          triggerSwitch();
+                          lastTapTime = 0;
+                        } else {
+                          lastTapTime = now;
+                        }
+                      });
+                      wrapperEl.addEventListener('dblclick', function () {
+                        triggerSwitch();
+                      });
+                    })();
+    
+        // Handle manual edits to the assigned ID
+    myIdInput.addEventListener('change', (e) => {
+      const newName = e.target.value.trim();
+      if (newName) {
+        myName = newName;
+        localStorage.setItem('myName', myName);
+        if (hasJoined) {
+          setDoc(doc(db, 'family_presence', myUid), { name: myName }, { merge: true });
+        }
+      } else {
+        e.target.value = myName; 
+      }
+    });
+
+    function setupKeepAliveAudio() {
+      if (!keepAliveAudio) {
+        keepAliveAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+        keepAliveAudio.loop = true;
+        keepAliveAudio.play().catch(() => {});
+      }
+    }
+
+    async function attemptMediaRecovery() {
+       if (!hasMedia) {
+        try {
+          // Attempt Video + Audio first
+                    localStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: currentProfile.width }, height: { ideal: currentProfile.height }, frameRate: { ideal: currentProfile.frameRate, max: currentProfile.frameRate } }, audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate } });
+                              localVideo.srcObject = localStream;
+                              hasMedia = true;
+                            } catch (e) {
+                              try {
+                                // Fallback to Audio only if camera denied or absent
+                                            localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate } });
+                                hasMedia = true;
+                              } catch(err) {
+                                alert("A/V DENIED BY OS SETTINGS.");
+                                return;
+                              }
+                            }
+                            
+                            Object.values(peers).forEach(pc => {
+                                      localStream.getTracks().forEach(track => {
+                                        const sender = pc.addTrack(track, localStream);
+                                        if (track.kind === 'video') {
+                                          applyBitrateToSender(sender);
+                                        }
+                                      });
+                                      applyDegradationPreference(pc);
+                                    });
+      }
+    }
+
+    function updateMediaState() {
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.enabled = isCommsLive);
+      }
+      
+      const remoteVideos = document.querySelectorAll('#videoGrid video:not(#localVideo)');
+            remoteVideos.forEach(v => {
+              if (isCommsLive) {
+                v.muted = true;
+                v.play().then(() => { v.muted = false; }).catch(() => {});
+              } else {
+                v.muted = true;
+              }
+            });
+
+      if (isCommsLive) {
+        waveform.classList.add('active');
+        videoCard.style.display = 'block';
+        statusText.textContent = "LINE LIVE (A/V)";
+        document.querySelector('.status-dot').classList.add('speaking');
+      } else {
+        waveform.classList.remove('active');
+        videoCard.style.display = 'none'; // Hide feeds to save space when cut
+        statusText.textContent = "STANDBY - MUTED";
+        document.querySelector('.status-dot').classList.remove('speaking');
+      }
+
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = isCommsLive ? 'playing' : 'paused';
+      }
+
+      if (hasJoined) {
+        setDoc(doc(db, 'family_presence', myUid), { speaking: isCommsLive }, { merge: true }).catch(() => {});
+      }
+    }
+
+    function endCall(isLocalAction = true) {
+      isCommsLive = false;
+      updateMediaState();
+      stopRinging();
+      cutCallBtn.style.display = 'none';
+      acceptCallBtn.style.display = 'none';
+
+      if (isLocalAction) {
+        addDoc(collection(db, 'family_signals'), { 
+          sender: myUid, 
+          receiver: 'all', 
+          type: 'cut', 
+          timestamp: Date.now() 
+        }).catch(()=>{});
+      }
+    }
+
+    // Accepting the Call
+    acceptCallBtn.onclick = async () => {
+      stopRinging();
+      try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch(e){}
+      await attemptMediaRecovery();
+      if(!hasMedia) return;
+      isCommsLive = true;
+      updateMediaState();
+      
+      acceptCallBtn.style.display = 'none';
+      cutCallBtn.style.display = 'block';
+    };
+
+    // Cutting the Call
+    cutCallBtn.onclick = () => {
+      endCall(true); 
+    };
+
+    const buzzCooldowns = {};
+    const BUZZ_COOLDOWN_MS = 3000;
+    let audioCtx = null;
+
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+
+    function playConnectBeep() {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const now = audioCtx.currentTime;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1200, now);
+        osc.frequency.exponentialRampToValueAtTime(1800, now + 0.1);
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.linearRampToValueAtTime(0.3, now + 0.05);
+        gain.gain.linearRampToValueAtTime(0.0001, now + 0.2);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.25);
+      } catch (e) {}
+    }
+
+    function playBuzzTone() {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const now = audioCtx.currentTime;
+        for (let i = 0; i < 3; i++) {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'square';
+          osc.frequency.value = 880;
+          gain.gain.setValueAtTime(0.0001, now + i * 0.35);
+          gain.gain.exponentialRampToValueAtTime(0.3, now + i * 0.35 + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.35 + 0.25);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(now + i * 0.35);
+          osc.stop(now + i * 0.35 + 0.3);
+        }
+      } catch (e) {}
+    }
+
+    function showBuzzToast(text) {
+      const toast = document.getElementById('buzzToast');
+      const toastText = document.getElementById('buzzToastText');
+      toastText.textContent = text;
+      toast.classList.add('show');
+    }
+    
+    function hideBuzzToast() {
+      document.getElementById('buzzToast').classList.remove('show');
+    }
+
+    function startRinging(fromName) {
+      if (ringingInterval) return; 
+      
+      if (isCommsLive) {
+         isCommsLive = false;
+         updateMediaState();
+      }
+
+      showBuzzToast('INCOMING PING: ' + fromName);
+      document.body.classList.add('incoming-buzz');
+      
+      acceptCallBtn.style.display = 'block';
+      cutCallBtn.style.display = 'none';
+
+      const triggerRing = () => {
+        playBuzzTone();
+        if (navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 400]);
+      };
+      
+      triggerRing();
+      ringingInterval = setInterval(triggerRing, 3000);
+    }
+
+    function stopRinging() {
+      if (ringingInterval) {
+        clearInterval(ringingInterval);
+        ringingInterval = null;
+      }
+      document.body.classList.remove('incoming-buzz');
+      hideBuzzToast();
+      acceptCallBtn.style.display = 'none';
+    }
+
+    async function sendBuzz(targetUid, btnEl) {
+          try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch(e){}
+          
+          const now = Date.now();
+                if (buzzCooldowns[targetUid] && now < buzzCooldowns[targetUid]) return;
+                buzzCooldowns[targetUid] = now + BUZZ_COOLDOWN_MS;
+                
+                const originalText = btnEl ? btnEl.textContent : null;
+                if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'TX..'; }
+                
+                if (!isCommsLive) {
+            await attemptMediaRecovery();
+            if (hasMedia) {
+               isCommsLive = true;
+               updateMediaState();
+               cutCallBtn.style.display = 'block';
+               acceptCallBtn.style.display = 'none';
+               stopRinging();
+            }
+          }
+          
+          try {
+            await addDoc(collection(db, 'family_buzz'), { sender: myUid, senderName: myName, receiver: targetUid, timestamp: now });
+          } catch (e) {}
+          
+          relayPushBuzz(targetUid);
+          
+          if (btnEl) {
+            setTimeout(() => { btnEl.disabled = false; btnEl.textContent = originalText; }, BUZZ_COOLDOWN_MS);
+          }
+        }
+
+    function listenForBuzzes() {
+      const qMine = query(collection(db, 'family_buzz'), where('receiver', '==', myUid));
+      onSnapshot(qMine, (snapshot) => {
+        snapshot.docChanges().forEach((change) => { 
+          if (change.type === 'added') {
+            if (change.doc.data().sender !== myUid) {
+               startRinging(change.doc.data().senderName || 'AGENT');
+            }
+            deleteDoc(doc(db, 'family_buzz', change.doc.id)).catch(() => {});
+          }
+        });
+      });
+
+      const qAll = query(collection(db, 'family_buzz'), where('receiver', '==', 'all'));
+      onSnapshot(qAll, (snapshot) => {
+        snapshot.docChanges().forEach((change) => { 
+          if (change.type === 'added') {
+             if (change.doc.data().sender !== myUid) {
+                startRinging(change.doc.data().senderName || 'AGENT');
+             }
+             deleteDoc(doc(db, 'family_buzz', change.doc.id)).catch(() => {});
+          } 
+        });
+      });
+    }
+
+    const buzzAllBtnEl = document.getElementById('buzzAllBtn');
+    buzzAllBtnEl.onclick = () => sendBuzz('all', buzzAllBtnEl);
+
+    function createPeer(targetUid) {
+      const pc = new RTCPeerConnection(servers);
+      candidateQueues[targetUid] = [];
+
+      if (localStream) {
+                    localStream.getTracks().forEach(track => {
+                      const sender = pc.addTrack(track, localStream);
+                      if (track.kind === 'video') {
+                        applyBitrateToSender(sender);
+                      }
+                    });
+                    applyDegradationPreference(pc);
+                  }
+
+      pc.ontrack = (event) => {
+              // Create remote video wrapper if it doesn't exist
+              let wrapper = document.getElementById('video-wrapper-' + targetUid);
+              if (!wrapper) {
+                wrapper = document.createElement('div');
+                wrapper.className = 'video-wrapper active';
+                wrapper.id = 'video-wrapper-' + targetUid;
+                
+                const vid = document.createElement('video');
+                vid.id = 'video-' + targetUid;
+                vid.autoplay = true;
+                vid.playsInline = true;
+                vid.muted = true;
+                
+                const label = document.createElement('div');
+                label.className = 'video-label';
+                label.textContent = 'NODE ' + targetUid;
+                
+                wrapper.appendChild(vid);
+                          wrapper.appendChild(label);
+                          document.getElementById('videoGrid').appendChild(wrapper);
+                          updateVideoGrid();
+                        }
+                        
+                        const videoEl = document.getElementById('video-' + targetUid);
+              videoEl.srcObject = event.streams[0];
+              // Start muted so autoplay is never blocked (works on Safari/iOS/Chrome alike),
+              // then unmute right after playback actually starts so speaker audio works on every device.
+              videoEl.muted = true;
+              videoEl.play().then(() => {
+                videoEl.muted = !isCommsLive;
+              }).catch(() => {
+                // Still blocked - updateMediaState() will retry the mute/play state on the next
+                // user action (Accept/Mute tap).
+              });
+            };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          addDoc(collection(db, 'family_signals'), { sender: myUid, receiver: targetUid, type: 'candidate', payload: JSON.stringify(event.candidate.toJSON()) });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+              const state = pc.connectionState;
+              if (state === 'connected') {
+                reconnectAttempts[targetUid] = 0;
+                if (reconnectTimers[targetUid]) {
+                  clearTimeout(reconnectTimers[targetUid]);
+                  delete reconnectTimers[targetUid];
+                }
+              } else if (state === 'disconnected') {
+                // 'disconnected' is often transient and self-recovers - give ICE a grace period before tearing down
+                setTimeout(() => {
+                  if (peers[targetUid] === pc && pc.connectionState !== 'connected') {
+                    cleanupPeer(targetUid);
+                    scheduleReconnect(targetUid);
+                  }
+                }, DISCONNECT_GRACE_MS);
+              } else if (state === 'failed' || state === 'closed') {
+                cleanupPeer(targetUid);
+                scheduleReconnect(targetUid);
+              }
+            };
+
+      peers[targetUid] = pc;
+      return pc;
+    }
+
+    function processQueuedCandidates(targetUid, pc) {
+      if (candidateQueues[targetUid]) {
+        candidateQueues[targetUid].forEach(cand => pc.addIceCandidate(cand).catch(() => {}));
+        candidateQueues[targetUid] = [];
+      }
+    }
+
+    function processSignal(change) {
+      if (change.type === 'added') {
+        const data = change.doc.data();
+        const sender = data.sender;
+        
+        if (sender === myUid) return;
+
+        if (data.type === 'cut') {
+          endCall(false); 
+          deleteDoc(doc(db, 'family_signals', change.doc.id)).catch(() => {});
+          return;
+        }
+
+        const payload = data.payload ? JSON.parse(data.payload) : null;
+        deleteDoc(doc(db, 'family_signals', change.doc.id)).catch(() => {});
+
+        try {
+          if (data.type === 'offer') {
+            const pc = createPeer(sender);
+            pc.setRemoteDescription(new RTCSessionDescription(payload)).then(() => {
+              processQueuedCandidates(sender, pc);
+              return pc.createAnswer();
+            }).then(answer => {
+              pc.setLocalDescription(answer);
+              addDoc(collection(db, 'family_signals'), { sender: myUid, receiver: sender, type: 'answer', payload: JSON.stringify(answer) });
+            });
+          } else if (data.type === 'answer') {
+            const pc = peers[sender];
+            if (pc) {
+              pc.setRemoteDescription(new RTCSessionDescription(payload)).then(() => processQueuedCandidates(sender, pc));
+            }
+          } else if (data.type === 'candidate') {
+            const pc = peers[sender];
+            const candidate = new RTCIceCandidate(payload);
+            if (pc && pc.remoteDescription) pc.addIceCandidate(candidate);
+            else {
+              candidateQueues[sender] = candidateQueues[sender] || [];
+              candidateQueues[sender].push(candidate);
+            }
+          }
+        } catch (e) {}
+      }
+    }
+
+    function listenForSignals() {
+      const qDirect = query(collection(db, 'family_signals'), where('receiver', '==', myUid));
+      onSnapshot(qDirect, (snapshot) => {
+        snapshot.docChanges().forEach(processSignal);
+      });
+      
+      const qGlobal = query(collection(db, 'family_signals'), where('receiver', '==', 'all'));
+      onSnapshot(qGlobal, (snapshot) => {
+        snapshot.docChanges().forEach(processSignal);
+      });
+    }
+
+    function listenForPresence() {
+      const membersList = document.getElementById('membersList');
+      
+      onSnapshot(collection(db, 'family_presence'), (snapshot) => {
+        membersList.innerHTML = '';
+        const now = Date.now();
+        
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          const uid = docSnap.id;
+          
+          // Clear dead feeds if someone closes the app
+                              if (!data.online || (now - data.lastSeen > 60000)) {
+                                onlineUids.delete(uid);
+                                if (reconnectTimers[uid]) {
+                                  clearTimeout(reconnectTimers[uid]);
+                                  delete reconnectTimers[uid];
+                                }
+                                delete reconnectAttempts[uid];
+                                cleanupPeer(uid);
+                      return;
+                    }
+          
+                    onlineUids.add(uid);
+                    const wasLive = agentPresenceStates[uid];
+          if (data.speaking && !wasLive && uid !== myUid) {
+             playConnectBeep();
+          }
+          agentPresenceStates[uid] = data.speaking;
+          
+          const li = document.createElement('li');
+          const nameWrap = document.createElement('div');
+          nameWrap.className = 'member-name';
+          
+          const dot = document.createElement('span');
+                    dot.className = 'status-dot ' + (data.online ? 'connected' : 'error') + (data.speaking ? ' speaking' : '');
+                    nameWrap.appendChild(dot);
+                    
+                    const label = data.name;
+                    nameWrap.appendChild(document.createTextNode(label));
+                    li.appendChild(nameWrap);
+          
+          if (uid !== myUid) {
+            const buzzBtn = document.createElement('button');
+            buzzBtn.className = 'buzz-member-btn';
+            buzzBtn.textContent = 'BUZZ';
+            
+            const cooldownEnd = buzzCooldowns[uid];
+            if (cooldownEnd && Date.now() < cooldownEnd) {
+              buzzBtn.disabled = true;
+              buzzBtn.textContent = 'TX...';
+            }
+            buzzBtn.onclick = () => sendBuzz(uid, buzzBtn);
+            li.appendChild(buzzBtn);
+          }
+          
+          membersList.appendChild(li);
+
+          if (uid !== myUid && myUid > uid) {
+            if (!peers[uid] || peers[uid].connectionState === 'closed') {
+              initiateCall(uid);
+            }
+          }
+        });
+      });
+    }
+
+    async function initiateCall(targetUid) {
+      const pc = createPeer(targetUid);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await addDoc(collection(db, 'family_signals'), { sender: myUid, receiver: targetUid, type: 'offer', payload: JSON.stringify(offer) });
+    }
+
+    async function subscribeToPush() {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+      if (!GLITCH_WORKER_URL || !VAPID_PUBLIC_KEY || GLITCH_WORKER_URL.includes('YOUR-GLITCH-PROJECT')) return;
+      try {
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') return;
+        const registration = await navigator.serviceWorker.ready;
+        let sub = await registration.pushManager.getSubscription();
+        if (!sub) {
+          sub = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+        }
+        await setDoc(doc(db, 'family_push_subscriptions', myUid), { subscription: JSON.stringify(sub.toJSON()), name: myName, updatedAt: Date.now() });
+      } catch (e) {}
+    }
+
+    async function relayPushBuzz(targetUid) {
+      if (!GLITCH_WORKER_URL || !VAPID_PUBLIC_KEY || GLITCH_WORKER_URL.includes('YOUR-GLITCH-PROJECT')) return;
+      try {
+        let targetDocs = [];
+        if (targetUid === 'all') {
+          const snap = await getDocs(query(collection(db, 'family_push_subscriptions')));
+          snap.forEach(d => { if (d.id !== myUid) targetDocs.push(d.data().subscription) });
+        } else {
+          const docSnap = await getDoc(doc(db, 'family_push_subscriptions', targetUid));
+          if (docSnap.exists()) targetDocs.push(docSnap.data().subscription);
+        }
+        for (const subStr of targetDocs) {
+          await fetch(GLITCH_WORKER_URL + '/buzz', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subscription: JSON.parse(subStr), senderName: myName })
+          });
+        }
+      } catch (e) {}
+    }
+
+    // Auto-initialize when the app loads
+            window.addEventListener('DOMContentLoaded', async () => {
+              try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+        
+              // 1. Reuse the camera/mic request already fired from the inline <head> script before
+              // Firebase even finished loading, instead of starting a brand new getUserMedia call here.
+              // Falls back to firing it fresh only if that early script somehow didn't run.
+              if (window.__earlyProfile) {
+                currentTier = window.__earlyTier;
+                currentProfile = window.__earlyProfile;
+              } else {
+                detectDeviceTier();
+              }
+              const mediaPromise = window.__earlyMediaPromise || navigator.mediaDevices.getUserMedia({ video: { width: { ideal: currentProfile.width }, height: { ideal: currentProfile.height }, frameRate: { ideal: currentProfile.frameRate, max: currentProfile.frameRate } }, audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate } })
+                .catch(() => navigator.mediaDevices.getUserMedia({ video: false, audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate } }))
+                .catch(() => null);
+        
+              // 2. The moment the stream is ready, show it. This is its own branch so it is never gated
+              // on the Firestore ID lookup below - a slow or cold Firestore connection can no longer
+              // delay when the camera appears.
+              const mediaReadyPromise = (async () => {
+                const mediaResult = await mediaPromise;
+                if (mediaResult) {
+                  localStream = mediaResult;
+                  hasMedia = true;
+                  if (localStream.getVideoTracks().length > 0) {
+                    localVideo.srcObject = localStream;
+                  }
+                } else {
+                  hasMedia = false;
+                }
+        
+                // Refine the quality tier in the background using the real screen refresh rate, without
+                // having delayed camera acquisition above for it.
+                refineDeviceTierInBackground();
+        
+                if (localStream) {
+                  localStream.getTracks().forEach(t => t.enabled = true);
+                  isCommsLive = true;
+                } else {
+                  isCommsLive = false;
+                }
+        
+                setupKeepAliveAudio();
+                updateMediaState();
+                updateVideoGrid(); // Init local scale
+              })();
+        
+              // 3. Fetch current users to determine the next ID - runs fully in parallel with the
+              // camera branch above; neither one waits on the other.
+              const idPromise = getDocs(collection(db, 'family_presence')).then((presenceSnap) => {
+                let maxId = 0;
+                const now = Date.now();
+                
+                presenceSnap.forEach((docSnap) => {
+                  const data = docSnap.data();
+                  if (data.online && (now - data.lastSeen < 60000) && data.name) {
+                    const num = parseInt(data.name);
+                    if (!isNaN(num) && num > maxId) {
+                      maxId = num;
+                    }
+                  }
+                });
+                
+                const nextIdNumber = maxId + 1;
+                myName = String(nextIdNumber).padStart(3, '0');
+                localStorage.setItem('myName', myName);
+                myIdInput.value = myName;
+        
+              }).catch((error) => {
+                console.error("Failed to assign ID, defaulting to 001", error);
+                myName = "001"; 
+                myIdInput.value = myName;
+              });
+        
+              // 4. Register Presence and enter channel once both branches above have settled - video
+              // display already happened without waiting for this.
+              await Promise.all([mediaReadyPromise, idPromise]);
+    
+          try {
+        await setDoc(doc(db, 'family_presence', myUid), {
+          name: myName,
+          online: true,
+          speaking: isCommsLive,
+          hasMic: hasMedia,
+          lastSeen: Date.now()
+        });
+        hasJoined = true;
+                
+                setInterval(() => {
+                    if (hasJoined) setDoc(doc(db, 'family_presence', myUid), { lastSeen: Date.now() }, { merge: true }).catch(()=>{});
+                }, 45000);
+        
+                subscribeToPush();
+                listenForSignals();
+                listenForPresence();
+                listenForBuzzes();
+                startAdaptiveMonitor();
+
+        const markOffline = () => {
+                  setDoc(doc(db, 'family_presence', myUid), { name: myName, online: false, speaking: false }, { merge: true }).catch(() => {});
+                };
+                window.addEventListener('beforeunload', markOffline);
+                window.addEventListener('pagehide', markOffline);
+        
+        if(isCommsLive) {
+           cutCallBtn.style.display = 'block';
+           acceptCallBtn.style.display = 'none';
+        }
+        
+      } catch (e) {
+        statusText.textContent = "UPLINK FAILED. RETRY.";
+      }
+    });
+  </script>
+</body>
+</html>
