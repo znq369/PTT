@@ -9,6 +9,7 @@
       var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
       var isCellular = conn && (conn.type === 'cellular' || conn.effectiveType !== '4g');
 
+      window.__AUDIO_FX = localStorage.getItem('headsetMode') !== '1';
       window.__QUALITY_PROFILES = {
         ultra:  {
           id: 'ultra',
@@ -16,9 +17,9 @@
           width: 1920,
           height: 1080,
           frameRate: 60,
-          maxBitrate: isCellular ? 3500000 : 6000000,
+          maxBitrate: isCellular ? 1500000 : 6000000,
           minBitrate: 300000,
-          startBitrate: 1800000,
+          startBitrate: 900000,
           audioSampleRate: 48000,
           audioBitrate: 96000,
           degradation: 'maintain-framerate',
@@ -30,9 +31,9 @@
           width: 1280,
           height: 720,
           frameRate: 60,
-          maxBitrate: isCellular ? 2200000 : 3500000,
+          maxBitrate: isCellular ? 1000000 : 3000000,
           minBitrate: 250000,
-          startBitrate: 1400000,
+          startBitrate: 700000,
           audioSampleRate: 48000,
           audioBitrate: 64000,
           degradation: 'maintain-framerate',
@@ -44,9 +45,9 @@
           width: 1280,
           height: 720,
           frameRate: 30,
-          maxBitrate: 1400000,
+          maxBitrate: 800000,
           minBitrate: 200000,
-          startBitrate: 900000,
+          startBitrate: 500000,
           audioSampleRate: 48000,
           audioBitrate: 48000,
           degradation: 'maintain-framerate',
@@ -58,9 +59,9 @@
           width: 854,
           height: 480,
           frameRate: 30,
-          maxBitrate: 750000,
+          maxBitrate: 450000,
           minBitrate: 150000,
-          startBitrate: 500000,
+          startBitrate: 350000,
           audioSampleRate: 48000,
           audioBitrate: 32000,
           degradation: 'maintain-framerate',
@@ -204,21 +205,21 @@
             frameRate: { ideal: profile.frameRate }
           },
           audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
+            echoCancellation: window.__AUDIO_FX,
+            noiseSuppression: window.__AUDIO_FX,
+            autoGainControl: window.__AUDIO_FX,
             sampleRate: profile.audioSampleRate,
             latency: 0.01
           }
         }).catch(function () {
           return navigator.mediaDevices.getUserMedia({
             video: true,
-            audio: { echoCancellation: true, noiseSuppression: true }
+            audio: { echoCancellation: window.__AUDIO_FX, noiseSuppression: window.__AUDIO_FX }
           });
         }).catch(function () {
           return navigator.mediaDevices.getUserMedia({
             video: false,
-            audio: { echoCancellation: true, noiseSuppression: true }
+            audio: { echoCancellation: window.__AUDIO_FX, noiseSuppression: window.__AUDIO_FX }
           });
         }).catch(function () {
           return null;
@@ -663,6 +664,25 @@
       iceCandidatePoolSize: 4
     };
 
+    async function refreshTurn() {
+      try {
+        const c = new AbortController();
+        const t = setTimeout(() => c.abort(), 2500);
+        const r = await fetch(GLITCH_WORKER_URL + '/turn-credentials', { signal: c.signal });
+        clearTimeout(t);
+        if (!r.ok || r.status === 204) return;
+        const d = await r.json();
+        if (d && Array.isArray(d.iceServers) && d.iceServers.length) {
+          servers.iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, ...d.iceServers];
+        }
+      } catch (e) {}
+    }
+    const turnReady = refreshTurn();
+    setInterval(refreshTurn, 6 * 3600 * 1000);
+    const wakeServer = () => fetch(GLITCH_WORKER_URL + '/', { mode: 'no-cors' }).catch(() => {});
+    wakeServer();
+    setInterval(wakeServer, 8 * 60 * 1000);
+
     const QUALITY_PROFILES = window.__QUALITY_PROFILES;
     let qualityMode = 'auto';
     let currentTier = window.__earlyTier || 'high';
@@ -709,25 +729,40 @@
     function boostSdpForMobileLowLatency(sdp, profile) {
       if (!sdp) return sdp;
       const maxKbps = Math.round(profile.maxBitrate / 1000);
-      const startKbps = Math.round((profile.startBitrate || 1400000) / 1000);
+      const startKbps = Math.round((profile.startBitrate || 700000) / 1000);
       const minKbps = Math.round((profile.minBitrate || 250000) / 1000);
+      const vPts = new Set();
+      sdp.replace(/a=rtpmap:(\d+) (?:H264|VP8|VP9|AV1|H265)\//gi, (m, pt) => { vPts.add(pt); return m; });
+      const om = sdp.match(/a=rtpmap:(\d+) opus\/48000/i);
+      const opusPt = om ? om[1] : null;
 
-      return sdp.replace(
-        /(a=fmtp:\d+ .*)/g,
-        `$1;x-google-start-bitrate=${startKbps};x-google-min-bitrate=${minKbps};x-google-max-bitrate=${maxKbps}`
-      );
+      let out = sdp.replace(/a=fmtp:(\d+) ([^\r\n]*)/g, (line, pt, params) => {
+        if (vPts.has(pt)) {
+          return `${line};x-google-start-bitrate=${startKbps};x-google-min-bitrate=${minKbps};x-google-max-bitrate=${maxKbps}`;
+        }
+        if (pt === opusPt) {
+          const kv = {};
+          params.split(';').forEach((x) => { const [k, v] = x.split('='); if (k) kv[k.trim()] = v; });
+          Object.assign(kv, { minptime: '10', useinbandfec: '1', usedtx: '0', stereo: '0', 'sprop-stereo': '0', cbr: '0', maxaveragebitrate: String(profile.audioBitrate || 48000) });
+          return 'a=fmtp:' + pt + ' ' + Object.entries(kv).map(([k, v]) => v === undefined ? k : k + '=' + v).join(';');
+        }
+        return line;
+      });
+      if (opusPt && !/a=ptime:/.test(out)) {
+        out = out.replace(new RegExp('(a=rtpmap:' + opusPt + ' opus/48000[^\\r\\n]*)', 'i'), '$1\r\na=ptime:10');
+      }
+      return out;
     }
 
     function applyCellularMicroBufferToReceiver(receiver, kind) {
       if (!receiver) return;
       try {
-        const delaySec = (hwInfo.playoutBufferMs || 25) / 1000;
-        if ('playoutDelayHint' in receiver) {
-          receiver.playoutDelayHint = kind === 'video' ? delaySec : 0.015;
-        }
-        if ('jitterBufferTarget' in receiver) {
-          receiver.jitterBufferTarget = kind === 'video' ? (hwInfo.playoutBufferMs || 25) : 15;
-        }
+        const isV = kind === 'video';
+        const j = (isV ? hwInfo.videoJitterMs : hwInfo.audioJitterMs) || 0;
+        const ms = isV ? Math.max(30, Math.min(150, 3 * j + 15)) : Math.max(30, Math.min(100, 3 * j + 10));
+        if (!isV) hwInfo.playoutBufferMs = ms;
+        if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = ms / 1000;
+        if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = ms;
       } catch (e) {}
     }
 
@@ -742,8 +777,8 @@
             params.encodings[0].maxBitrate = currentProfile.maxBitrate;
             params.encodings[0].maxFramerate = currentProfile.frameRate;
             params.encodings[0].scaleResolutionDownBy = 1.0;
-            params.encodings[0].priority = 'high';
-            params.encodings[0].networkPriority = 'high';
+            params.encodings[0].priority = 'medium';
+            params.encodings[0].networkPriority = 'medium';
             params.degradationPreference = currentProfile.degradation || 'maintain-framerate';
             sender.setParameters(params).catch(() => {});
           } catch (e) {}
@@ -799,6 +834,12 @@
 
       hwInfo.activeRes = `${actualW}×${actualH}`;
       hwInfo.activeFps = actualFps;
+      document.querySelectorAll('[id^="remote-res-"]').forEach((el) => {
+        const w = el.closest('.video-wrapper');
+        const v = w && w.querySelector('video');
+        const r = v && v.videoWidth ? v.videoWidth + '×' + v.videoHeight + ' • ' : '';
+        el.textContent = r + (hwInfo.pathType || '…') + ' • ' + hwInfo.roundTripMs + 'MS';
+      });
 
       const localResTag = document.getElementById('localResTag');
       if (localResTag) {
@@ -830,7 +871,7 @@
       if (encEl) encEl.textContent = `${hwInfo.encoderType} • ${hwInfo.playoutBufferMs}ms Burst Buffer`;
 
       const netEl = document.getElementById('hwNetVal');
-      if (netEl) netEl.textContent = `${hwInfo.roundTripMs}ms RTT • ${hwInfo.jitterMs}ms Jit • ${hwInfo.packetLossPct}% Loss`;
+      if (netEl) netEl.textContent = `${hwInfo.pathType || '…'} • ${hwInfo.roundTripMs}ms RTT • ${hwInfo.jitterMs}ms Jit • ${hwInfo.packetLossPct}% Loss`;
 
       const activeStreamEl = document.getElementById('hwActiveStreamVal');
       if (activeStreamEl) {
@@ -857,7 +898,7 @@
             stats.forEach((report) => {
               if (report.type === 'outbound-rtp' && report.kind === 'video') {
                 if (report.encoderImplementation) {
-                  hwInfo.encoderType = report.powerEfficientEncoder !== false
+                  hwInfo.encoderType = report.powerEfficientEncoder === true
                     ? `HW ASIC (${report.encoderImplementation})`
                     : `SW (${report.encoderImplementation})`;
                 }
@@ -865,23 +906,28 @@
                   cpuOrBandwidthLimited = true;
                 }
               }
-              if (report.type === 'inbound-rtp' && report.kind === 'video') {
+              if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.kind === 'audio')) {
                 if (typeof report.jitter === 'number') {
                   hwInfo.jitterMs = Math.round(report.jitter * 1000);
-                  hwInfo.playoutBufferMs = Math.max(15, Math.min(40, hwInfo.jitterMs + 10));
+                  if (report.kind === 'video') hwInfo.videoJitterMs = hwInfo.jitterMs; else hwInfo.audioJitterMs = hwInfo.jitterMs;
                 }
                 if (report.packetsReceived > 0 && typeof report.packetsLost === 'number') {
                   const total = report.packetsReceived + Math.max(0, report.packetsLost);
                   hwInfo.packetLossPct = Math.round((Math.max(0, report.packetsLost) / total) * 100);
                 }
               }
-              if (report.type === 'candidate-pair' && report.state === 'succeeded' && typeof report.currentRoundTripTime === 'number') {
-                hwInfo.roundTripMs = Math.round(report.currentRoundTripTime * 1000);
-                if (hwInfo.roundTripMs > 220) {
-                  cpuOrBandwidthLimited = true;
-                }
-              }
             });
+            let selId = null;
+            stats.forEach((r) => { if (r.type === 'transport' && r.selectedCandidatePairId) selId = r.selectedCandidatePairId; });
+            let pair = selId ? stats.get(selId) : null;
+            if (!pair) stats.forEach((r) => { if (r.type === 'candidate-pair' && (r.selected || (r.nominated && r.state === 'succeeded'))) pair = r; });
+            if (pair) {
+              if (typeof pair.currentRoundTripTime === 'number') hwInfo.roundTripMs = Math.round(pair.currentRoundTripTime * 1000);
+              const lc = stats.get(pair.localCandidateId), rc = stats.get(pair.remoteCandidateId);
+              const isRelay = (lc && lc.candidateType === 'relay') || (rc && rc.candidateType === 'relay');
+              hwInfo.pathType = isRelay ? 'RELAY' : 'DIRECT';
+              if (hwInfo.roundTripMs > (isRelay ? 150 : 120)) cpuOrBandwidthLimited = true;
+            }
 
             pc.getReceivers().forEach(r => {
               if (r.track) applyCellularMicroBufferToReceiver(r, r.track.kind);
@@ -903,7 +949,7 @@
         } else {
           congestionStrikes = 0;
         }
-      }, 3000);
+      }, 2000);
     }
 
     const hwHudBtn = document.getElementById('hwHudBtn');
@@ -931,6 +977,24 @@
         }
       });
     });
+
+    (function () {
+      const bar = document.getElementById('hwModeBar');
+      if (!bar || !bar.parentNode) return;
+      const b = document.createElement('button');
+      const label = () => { b.textContent = window.__AUDIO_FX ? 'HEADSET MODE: OFF' : 'HEADSET MODE: ON (AEC/NS/AGC OFF)'; };
+      b.style.cssText = 'margin-top:8px;padding:8px 12px;border-radius:8px;border:1px solid #6b3fd4;background:transparent;color:#fff;font:inherit;cursor:pointer;width:100%';
+      label();
+      b.onclick = () => {
+        window.__AUDIO_FX = !window.__AUDIO_FX;
+        localStorage.setItem('headsetMode', window.__AUDIO_FX ? '0' : '1');
+        const a = localStream && localStream.getAudioTracks()[0];
+        const fx = window.__AUDIO_FX;
+        if (a) a.applyConstraints({ echoCancellation: fx, noiseSuppression: fx, autoGainControl: fx }).catch(() => {});
+        label();
+      };
+      bar.parentNode.insertBefore(b, bar.nextSibling);
+    })();
 
     const myUid = localStorage.getItem('myUid') || Math.random().toString(36).substring(2, 10);
     localStorage.setItem('myUid', myUid);
@@ -1147,9 +1211,9 @@
               frameRate: { ideal: currentProfile.frameRate }
             },
             audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
+              echoCancellation: window.__AUDIO_FX,
+              noiseSuppression: window.__AUDIO_FX,
+              autoGainControl: window.__AUDIO_FX,
               sampleRate: currentProfile.audioSampleRate,
               latency: 0.01
             }
@@ -1161,7 +1225,7 @@
           try {
             localStream = await navigator.mediaDevices.getUserMedia({
               video: false,
-              audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate }
+              audio: { echoCancellation: window.__AUDIO_FX, noiseSuppression: window.__AUDIO_FX, sampleRate: currentProfile.audioSampleRate }
             });
             hasMedia = true;
           } catch (err) {
@@ -1442,7 +1506,7 @@
           vid.addEventListener('loadedmetadata', () => {
             const rTag = document.getElementById('remote-res-' + targetUid);
             if (rTag && vid.videoWidth) {
-              rTag.textContent = `${vid.videoWidth}×${vid.videoHeight} • 25MS`;
+              rTag.textContent = `${vid.videoWidth}×${vid.videoHeight}`;
             }
           });
 
@@ -1629,6 +1693,7 @@
     }
 
     async function initiateCall(targetUid) {
+      await Promise.race([turnReady, new Promise((r) => setTimeout(r, 1500))]);
       const pc = createPeer(targetUid);
       const offer = await pc.createOffer();
       offer.sdp = boostSdpForMobileLowLatency(offer.sdp, currentProfile);
@@ -1700,7 +1765,7 @@
           height: { ideal: currentProfile.height },
           frameRate: { ideal: currentProfile.frameRate }
         },
-        audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate, latency: 0.01 }
+        audio: { echoCancellation: window.__AUDIO_FX, noiseSuppression: window.__AUDIO_FX, sampleRate: currentProfile.audioSampleRate, latency: 0.01 }
       }).catch(() => null);
 
       const mediaReadyPromise = (async () => {
