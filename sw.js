@@ -1,69 +1,33 @@
-const express = require("express");
-const webpush = require("web-push");
-const cors = require("cors");
-const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-const PUBLIC_KEY = "BCPTdBcEXkGuQTtLehEmXp7KkN5jqhAyp4VbL7GZn1ixXAyt_AOXq6qAzzSJO8BM47YnfdGmLc990m0P3ER_2RA";
-const PRIVATE_KEY = "xTVTs7JuPjlzaSS8UnEEYBtCpFMlihslX9_9SIph1sU";
-
-webpush.setVapidDetails(
-  "mailto:888znq@Gmail.com", 
-  PUBLIC_KEY,
-  PRIVATE_KEY
-);
-
-app.get("/", (req, res) => {
-  res.send("Live Line push relay server is active.");
+// sw.js - Service Worker for Background Buzz & Media Alerts
+self.addEventListener('install', (e) => {
+  self.skipWaiting();
 });
 
-let turnCache = { at: 0, data: null };
-app.get("/turn-credentials", async (req, res) => {
-  const id = process.env.CF_TURN_KEY_ID, token = process.env.CF_TURN_API_TOKEN;
-  if (!id || !token) return res.status(204).end();
-  try {
-    if (!turnCache.data || Date.now() - turnCache.at > 3600 * 1000) {
-      const r = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${id}/credentials/generate-ice-servers`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ ttl: 86400 })
-      });
-      if (!r.ok) throw new Error("cloudflare " + r.status);
-      const d = await r.json();
-      turnCache = { at: Date.now(), data: { iceServers: [].concat(d.iceServers || []) } };
-    }
-    res.set("Cache-Control", "no-store").json(turnCache.data);
-  } catch (e) {
-    console.error("TURN creds failed:", e.message);
-    res.status(204).end();
-  }
+self.addEventListener('activate', (e) => {
+  e.waitUntil(self.clients.claim());
 });
 
-app.post("/buzz", async (req, res) => {
-  const { subscription, senderName } = req.body;
-  
-  if (!subscription) {
-    return res.status(400).send("No subscription provided.");
-  }
-
-  const payload = JSON.stringify({
-    title: "Live Line Alert",
-    body: `${senderName || 'An Agent'} is buzzing you!`
-  });
-
-  try {
-    await webpush.sendNotification(subscription, payload, { urgency: "high", TTL: 30 });
-    console.log(`Successfully buzzed from ${senderName}`);
-    res.status(200).send("Buzzed successfully!");
-  } catch (error) {
-    console.error("Push failed:", error);
-    if (error.statusCode === 404 || error.statusCode === 410) return res.status(410).send("Subscription expired.");
-    res.status(500).send("Push failed.");
-  }
+self.addEventListener('push', (e) => {
+  const data = e.data ? e.data.json() : { title: 'Live Line Alert', body: 'Incoming tactical buzz!' };
+  e.waitUntil(
+    self.registration.showNotification(data.title, {
+      body: data.body,
+      icon: 'https://cdn-icons-png.flaticon.com/512/3114/3114320.png',
+      vibrate: [400, 150, 400, 150, 400],
+      tag: 'live-line-buzz',
+      requireInteraction: true
+    })
+  );
 });
 
-const listener = app.listen(process.env.PORT || 3000, () => {
-  console.log("Push server listening on port " + listener.address().port);
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url && 'focus' in client) return client.focus();
+      }
+      if (clients.openWindow) return clients.openWindow('/');
+    })
+  );
 });
