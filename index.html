@@ -4,8 +4,7 @@
   <meta charset="UTF-8">
   <script>
     // 4G/5G CELLULAR ZERO-BUFFERBLOAT & HARDWARE ASIC ENGINE
-    // Tuned specifically for mobile data uplinks: keeps H.264 encoding on the phone's
-    // dedicated hardware chip while preventing 4G/5G upload queue buildup (bufferbloat).
+    // Fires camera request in the first tick before Firebase modules download.
     (function () {
       var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
       var isCellular = conn && (conn.type === 'cellular' || conn.effectiveType !== '4g');
@@ -17,7 +16,6 @@
           width: 1920,
           height: 1080,
           frameRate: 60,
-          // 3.5 Mbps ceiling prevents 4G/5G uplink bufferbloat while keeping 1080p60 sharp
           maxBitrate: isCellular ? 3500000 : 6000000,
           minBitrate: 300000,
           startBitrate: 1800000,
@@ -32,7 +30,6 @@
           width: 1280,
           height: 720,
           frameRate: 60,
-          // Sweet spot for 4G/5G: 720p60 at 2.2 Mbps gives zero-lag 60fps over mobile data
           maxBitrate: isCellular ? 2200000 : 3500000,
           minBitrate: 250000,
           startBitrate: 1400000,
@@ -143,8 +140,6 @@
 
         score += gpuEval.pts;
 
-        // On 4G/5G with higher initial RTT (>80ms), default flagship phones to 720p60 ('high')
-        // so cellular uplink never chokes; if RTT is super low (<60ms), allow 'ultra' 1080p60.
         var tier = 'high';
         var processorClass = 'FAST CPU (4G/5G LOW-LAG)';
         if (score >= 75) {
@@ -482,7 +477,7 @@
   <div class="hw-modal-backdrop" id="hwModalBackdrop">
     <div class="hw-modal">
       <div class="hw-modal-header">
-        <span class="hw-modal-title">4G/5G MOBILE HARDWARE ASIC ENGINE</span>
+        <span class="hw-modal-title">RTDB WEBSOCKET + 4G/5G HW ASIC ENGINE</span>
         <button class="hw-close-btn" id="hwModalCloseBtn">CLOSE [X]</button>
       </div>
       <div class="hw-grid">
@@ -603,10 +598,21 @@
     })();
   </script>
 
-  <!-- Core App Logic -->
+  <!-- Core App Logic (Switched to Firebase Realtime Database WebSocket Engine) -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
-    import { getFirestore, collection, doc, setDoc, onSnapshot, addDoc, deleteDoc, query, where, getDoc, getDocs } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+    import {
+      getDatabase,
+      ref,
+      set,
+      update,
+      push,
+      onValue,
+      onChildAdded,
+      remove,
+      get,
+      onDisconnect
+    } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-database.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyCX-bZLDHy-6wxuc5b8YInV_Mr7uYOTmgk",
@@ -619,7 +625,7 @@
     };
 
     const app = initializeApp(firebaseConfig);
-    const db = getFirestore(app);
+    const rtdb = getDatabase(app);
 
     const GLITCH_WORKER_URL = "https://ptt-backend-zi8u.onrender.com";
     const VAPID_PUBLIC_KEY = "BCPTdBcEXkGuQTtLehEmXp7KkN5jqhAyp4VbL7GZn1ixXAyt_AOXq6qAzzSJO8BM47YnfdGmLc990m0P3ER_2RA";
@@ -637,7 +643,7 @@
       navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
 
-    // Multi-STUN + Free OpenRelay TURN Fallback so 4G/5G Carrier CGNAT Never Blocks Direct Calls
+    // Multi-STUN + Free OpenRelay TURN Fallback for 4G/5G Carrier CGNAT
     const servers = {
       iceServers: [
         { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
@@ -679,7 +685,6 @@
       });
     }
 
-    // 1. Force Hardware H.264 Codec on Transceivers so the Phone's ASIC Chip Encodes Instead of CPU
     function preferHardwareH264Codec(pc) {
       try {
         if (!RTCRtpSender.getCapabilities) return;
@@ -701,7 +706,6 @@
       } catch (e) {}
     }
 
-    // 2. Inject Mobile-Safe Start Bitrate & Anti-Bufferbloat Min Bitrate Floor
     function boostSdpForMobileLowLatency(sdp, profile) {
       if (!sdp) return sdp;
       const maxKbps = Math.round(profile.maxBitrate / 1000);
@@ -714,7 +718,6 @@
       );
     }
 
-    // 3. Set 25ms Micro-Buffer on 4G/5G to Absorb Cell Tower Packet Bursts Without Stutter
     function applyCellularMicroBufferToReceiver(receiver, kind) {
       if (!receiver) return;
       try {
@@ -841,7 +844,6 @@
       });
     }
 
-    // Monitor 4G/5G RTT, Jitter, Packet Loss & Hardware ASIC Status
     let congestionStrikes = 0;
     function startAdaptiveMonitor() {
       setInterval(async () => {
@@ -866,7 +868,6 @@
               if (report.type === 'inbound-rtp' && report.kind === 'video') {
                 if (typeof report.jitter === 'number') {
                   hwInfo.jitterMs = Math.round(report.jitter * 1000);
-                  // Dynamically tune receiver buffer between 15ms and 35ms based on live 4G/5G tower jitter
                   hwInfo.playoutBufferMs = Math.max(15, Math.min(40, hwInfo.jitterMs + 10));
                 }
                 if (report.packetsReceived > 0 && typeof report.packetsLost === 'number') {
@@ -877,12 +878,11 @@
               if (report.type === 'candidate-pair' && report.state === 'succeeded' && typeof report.currentRoundTripTime === 'number') {
                 hwInfo.roundTripMs = Math.round(report.currentRoundTripTime * 1000);
                 if (hwInfo.roundTripMs > 220) {
-                  cpuOrBandwidthLimited = true; // 4G/5G uplink bufferbloat detected
+                  cpuOrBandwidthLimited = true;
                 }
               }
             });
 
-            // Apply updated micro-buffer to receivers
             pc.getReceivers().forEach(r => {
               if (r.track) applyCellularMicroBufferToReceiver(r, r.track.kind);
             });
@@ -944,9 +944,9 @@
     const reconnectAttempts = {};
     const reconnectTimers = {};
     const onlineUids = new Set();
-    const RECONNECT_BASE_MS = 1000;
-    const RECONNECT_MAX_MS = 30000;
-    const DISCONNECT_GRACE_MS = 5000;
+    const RECONNECT_BASE_MS = 800;
+    const RECONNECT_MAX_MS = 15000;
+    const DISCONNECT_GRACE_MS = 4000;
 
     function cleanupPeer(uid) {
       const wrapper = document.getElementById('video-wrapper-' + uid);
@@ -1121,7 +1121,7 @@
         myName = newName;
         localStorage.setItem('myName', myName);
         if (hasJoined) {
-          setDoc(doc(db, 'family_presence', myUid), { name: myName }, { merge: true });
+          update(ref(rtdb, 'family_presence/' + myUid), { name: myName }).catch(() => {});
         }
       } else {
         e.target.value = myName;
@@ -1213,11 +1213,21 @@
       }
 
       if (hasJoined) {
-        setDoc(doc(db, 'family_presence', myUid), {
+        update(ref(rtdb, 'family_presence/' + myUid), {
           speaking: isCommsLive,
-          tier: currentProfile.label
-        }, { merge: true }).catch(() => {});
+          tier: currentProfile.label,
+          lastSeen: Date.now()
+        }).catch(() => {});
       }
+    }
+
+    function sendSignalToPeer(targetUid, type, payloadObj = null) {
+      return push(ref(rtdb, 'family_signals/' + targetUid), {
+        sender: myUid,
+        type: type,
+        payload: payloadObj ? JSON.stringify(payloadObj) : null,
+        timestamp: Date.now()
+      }).catch(() => {});
     }
 
     function endCall(isLocalAction = true) {
@@ -1228,12 +1238,11 @@
       acceptCallBtn.style.display = 'none';
 
       if (isLocalAction) {
-        addDoc(collection(db, 'family_signals'), {
-          sender: myUid,
-          receiver: 'all',
-          type: 'cut',
-          timestamp: Date.now()
-        }).catch(() => {});
+        onlineUids.forEach((uid) => {
+          if (uid !== myUid) {
+            sendSignalToPeer(uid, 'cut', null);
+          }
+        });
       }
     }
 
@@ -1367,9 +1376,16 @@
         }
       }
 
-      try {
-        await addDoc(collection(db, 'family_buzz'), { sender: myUid, senderName: myName, receiver: targetUid, timestamp: now });
-      } catch (e) {}
+      const buzzPayload = { sender: myUid, senderName: myName, timestamp: now };
+      if (targetUid === 'all') {
+        onlineUids.forEach((uid) => {
+          if (uid !== myUid) {
+            push(ref(rtdb, 'family_buzz/' + uid), buzzPayload).catch(() => {});
+          }
+        });
+      } else {
+        push(ref(rtdb, 'family_buzz/' + targetUid), buzzPayload).catch(() => {});
+      }
 
       relayPushBuzz(targetUid);
 
@@ -1379,28 +1395,13 @@
     }
 
     function listenForBuzzes() {
-      const qMine = query(collection(db, 'family_buzz'), where('receiver', '==', myUid));
-      onSnapshot(qMine, (snapshot) => {
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === 'added') {
-            if (change.doc.data().sender !== myUid) {
-              startRinging(change.doc.data().senderName || 'AGENT');
-            }
-            deleteDoc(doc(db, 'family_buzz', change.doc.id)).catch(() => {});
-          }
-        });
-      });
-
-      const qAll = query(collection(db, 'family_buzz'), where('receiver', '==', 'all'));
-      onSnapshot(qAll, (snapshot) => {
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === 'added') {
-            if (change.doc.data().sender !== myUid) {
-              startRinging(change.doc.data().senderName || 'AGENT');
-            }
-            deleteDoc(doc(db, 'family_buzz', change.doc.id)).catch(() => {});
-          }
-        });
+      const myBuzzRef = ref(rtdb, 'family_buzz/' + myUid);
+      onChildAdded(myBuzzRef, (snap) => {
+        const data = snap.val();
+        remove(snap.ref).catch(() => {});
+        if (data && data.sender !== myUid && (Date.now() - (data.timestamp || 0) < 30000)) {
+          startRinging(data.senderName || 'AGENT');
+        }
       });
     }
 
@@ -1461,7 +1462,7 @@
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          addDoc(collection(db, 'family_signals'), { sender: myUid, receiver: targetUid, type: 'candidate', payload: JSON.stringify(event.candidate.toJSON()) });
+          sendSignalToPeer(targetUid, 'candidate', event.candidate.toJSON());
         }
       };
 
@@ -1498,24 +1499,30 @@
       }
     }
 
-    function processSignal(change) {
-      if (change.type === 'added') {
-        const data = change.doc.data();
-        const sender = data.sender;
+    function listenForSignals() {
+      const mySignalsRef = ref(rtdb, 'family_signals/' + myUid);
+      onChildAdded(mySignalsRef, (snap) => {
+        const data = snap.val();
+        remove(snap.ref).catch(() => {});
+        if (!data || data.sender === myUid) return;
 
-        if (sender === myUid) return;
+        // Ignore stale signals older than 25 seconds
+        if (data.timestamp && (Date.now() - data.timestamp > 25000)) return;
+
+        const sender = data.sender;
 
         if (data.type === 'cut') {
           endCall(false);
-          deleteDoc(doc(db, 'family_signals', change.doc.id)).catch(() => {});
           return;
         }
 
         const payload = data.payload ? JSON.parse(data.payload) : null;
-        deleteDoc(doc(db, 'family_signals', change.doc.id)).catch(() => {});
 
         try {
           if (data.type === 'offer') {
+            if (peers[sender]) {
+              cleanupPeer(sender);
+            }
             const pc = createPeer(sender);
             pc.setRemoteDescription(new RTCSessionDescription(payload)).then(() => {
               processQueuedCandidates(sender, pc);
@@ -1523,7 +1530,7 @@
             }).then(answer => {
               answer.sdp = boostSdpForMobileLowLatency(answer.sdp, currentProfile);
               pc.setLocalDescription(answer);
-              addDoc(collection(db, 'family_signals'), { sender: myUid, receiver: sender, type: 'answer', payload: JSON.stringify(answer) });
+              sendSignalToPeer(sender, 'answer', answer);
             });
           } else if (data.type === 'answer') {
             const pc = peers[sender];
@@ -1533,40 +1540,30 @@
           } else if (data.type === 'candidate') {
             const pc = peers[sender];
             const candidate = new RTCIceCandidate(payload);
-            if (pc && pc.remoteDescription) pc.addIceCandidate(candidate);
-            else {
+            if (pc && pc.remoteDescription) {
+              pc.addIceCandidate(candidate).catch(() => {});
+            } else {
               candidateQueues[sender] = candidateQueues[sender] || [];
               candidateQueues[sender].push(candidate);
             }
           }
         } catch (e) {}
-      }
-    }
-
-    function listenForSignals() {
-      const qDirect = query(collection(db, 'family_signals'), where('receiver', '==', myUid));
-      onSnapshot(qDirect, (snapshot) => {
-        snapshot.docChanges().forEach(processSignal);
-      });
-
-      const qGlobal = query(collection(db, 'family_signals'), where('receiver', '==', 'all'));
-      onSnapshot(qGlobal, (snapshot) => {
-        snapshot.docChanges().forEach(processSignal);
       });
     }
 
     function listenForPresence() {
       const membersList = document.getElementById('membersList');
+      const presenceRef = ref(rtdb, 'family_presence');
 
-      onSnapshot(collection(db, 'family_presence'), (snapshot) => {
+      onValue(presenceRef, (snapshot) => {
         membersList.innerHTML = '';
         const now = Date.now();
+        const allNodes = snapshot.val() || {};
+        const seenInSnapshot = new Set();
 
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          const uid = docSnap.id;
-
-          if (!data.online || (now - data.lastSeen > 60000)) {
+        Object.keys(allNodes).forEach((uid) => {
+          const data = allNodes[uid];
+          if (!data || !data.online || (data.lastSeen && (now - data.lastSeen > 65000))) {
             onlineUids.delete(uid);
             if (reconnectTimers[uid]) {
               clearTimeout(reconnectTimers[uid]);
@@ -1577,7 +1574,9 @@
             return;
           }
 
+          seenInSnapshot.add(uid);
           onlineUids.add(uid);
+
           const wasLive = agentPresenceStates[uid];
           if (data.speaking && !wasLive && uid !== myUid) {
             playConnectBeep();
@@ -1618,6 +1617,14 @@
             }
           }
         });
+
+        // Clean up any peer that disappeared completely from the RTDB tree
+        Array.from(onlineUids).forEach((uid) => {
+          if (!seenInSnapshot.has(uid)) {
+            onlineUids.delete(uid);
+            cleanupPeer(uid);
+          }
+        });
       });
     }
 
@@ -1626,7 +1633,7 @@
       const offer = await pc.createOffer();
       offer.sdp = boostSdpForMobileLowLatency(offer.sdp, currentProfile);
       await pc.setLocalDescription(offer);
-      await addDoc(collection(db, 'family_signals'), { sender: myUid, receiver: targetUid, type: 'offer', payload: JSON.stringify(offer) });
+      await sendSignalToPeer(targetUid, 'offer', offer);
     }
 
     async function subscribeToPush() {
@@ -1640,22 +1647,33 @@
         if (!sub) {
           sub = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
         }
-        await setDoc(doc(db, 'family_push_subscriptions', myUid), { subscription: JSON.stringify(sub.toJSON()), name: myName, updatedAt: Date.now() });
+        await set(ref(rtdb, 'family_push_subscriptions/' + myUid), {
+          subscription: JSON.stringify(sub.toJSON()),
+          name: myName,
+          updatedAt: Date.now()
+        });
       } catch (e) {}
     }
 
     async function relayPushBuzz(targetUid) {
       if (!GLITCH_WORKER_URL || !VAPID_PUBLIC_KEY || GLITCH_WORKER_URL.includes('YOUR-GLITCH-PROJECT')) return;
       try {
-        let targetDocs = [];
+        let targetSubs = [];
         if (targetUid === 'all') {
-          const snap = await getDocs(query(collection(db, 'family_push_subscriptions')));
-          snap.forEach(d => { if (d.id !== myUid) targetDocs.push(d.data().subscription); });
+          const snap = await get(ref(rtdb, 'family_push_subscriptions'));
+          const allSubs = snap.val() || {};
+          Object.keys(allSubs).forEach((uid) => {
+            if (uid !== myUid && allSubs[uid] && allSubs[uid].subscription) {
+              targetSubs.push(allSubs[uid].subscription);
+            }
+          });
         } else {
-          const docSnap = await getDoc(doc(db, 'family_push_subscriptions', targetUid));
-          if (docSnap.exists()) targetDocs.push(docSnap.data().subscription);
+          const snap = await get(ref(rtdb, 'family_push_subscriptions/' + targetUid));
+          if (snap.exists() && snap.val().subscription) {
+            targetSubs.push(snap.val().subscription);
+          }
         }
-        for (const subStr of targetDocs) {
+        for (const subStr of targetSubs) {
           await fetch(GLITCH_WORKER_URL + '/buzz', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1711,14 +1729,20 @@
         refreshHardwareTelemetryUI();
       })();
 
-      const idPromise = getDocs(collection(db, 'family_presence')).then((presenceSnap) => {
+      // Clear any leftover signals/buzzes in our RTDB inbox and assign next ID in parallel
+      const idPromise = Promise.all([
+        remove(ref(rtdb, 'family_signals/' + myUid)).catch(() => {}),
+        remove(ref(rtdb, 'family_buzz/' + myUid)).catch(() => {}),
+        get(ref(rtdb, 'family_presence'))
+      ]).then(([, , presenceSnap]) => {
         let maxId = 0;
         const now = Date.now();
+        const allNodes = presenceSnap.val() || {};
 
-        presenceSnap.forEach((docSnap) => {
-          const data = docSnap.data();
-          if (data.online && (now - data.lastSeen < 60000) && data.name) {
-            const num = parseInt(data.name);
+        Object.keys(allNodes).forEach((uid) => {
+          const data = allNodes[uid];
+          if (data && data.online && (!data.lastSeen || (now - data.lastSeen < 65000)) && data.name) {
+            const num = parseInt(data.name, 10);
             if (!isNaN(num) && num > maxId) {
               maxId = num;
             }
@@ -1737,24 +1761,39 @@
       await Promise.all([mediaReadyPromise, idPromise]);
 
       try {
-        await setDoc(doc(db, 'family_presence', myUid), {
-          name: myName,
-          online: true,
-          speaking: isCommsLive,
-          hasMic: hasMedia,
-          hwSummary: `${hwInfo.cores}C•${currentProfile.label}`,
-          lastSeen: Date.now()
+        const myPresenceRef = ref(rtdb, 'family_presence/' + myUid);
+        const connectedRef = ref(rtdb, '.info/connected');
+
+        // Native WebSocket onDisconnect hook: marks node offline the millisecond 4G/5G or tab closes
+        onValue(connectedRef, (snap) => {
+          if (snap.val() === true) {
+            onDisconnect(myPresenceRef).update({
+              online: false,
+              speaking: false,
+              lastSeen: Date.now()
+            }).catch(() => {});
+
+            set(myPresenceRef, {
+              name: myName,
+              online: true,
+              speaking: isCommsLive,
+              hasMic: hasMedia,
+              hwSummary: `${hwInfo.cores}C•${currentProfile.label}`,
+              lastSeen: Date.now()
+            }).catch(() => {});
+          }
         });
+
         hasJoined = true;
 
         setInterval(() => {
           if (hasJoined) {
-            setDoc(doc(db, 'family_presence', myUid), {
+            update(myPresenceRef, {
               lastSeen: Date.now(),
               hwSummary: `${hwInfo.cores}C•${currentProfile.label}`
-            }, { merge: true }).catch(() => {});
+            }).catch(() => {});
           }
-        }, 45000);
+        }, 30000);
 
         subscribeToPush();
         listenForSignals();
@@ -1763,7 +1802,7 @@
         startAdaptiveMonitor();
 
         const markOffline = () => {
-          setDoc(doc(db, 'family_presence', myUid), { name: myName, online: false, speaking: false }, { merge: true }).catch(() => {});
+          update(myPresenceRef, { name: myName, online: false, speaking: false, lastSeen: Date.now() }).catch(() => {});
         };
         window.addEventListener('beforeunload', markOffline);
         window.addEventListener('pagehide', markOffline);
