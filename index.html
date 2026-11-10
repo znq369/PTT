@@ -17,9 +17,9 @@
           width: 1920,
           height: 1080,
           frameRate: 60,
-          maxBitrate: isCellular ? 1500000 : 6000000,
+          maxBitrate: isCellular ? 2200000 : 6000000,
           minBitrate: 300000,
-          startBitrate: 900000,
+          startBitrate: 1200000,
           audioSampleRate: 48000,
           audioBitrate: 96000,
           degradation: 'maintain-framerate',
@@ -31,9 +31,9 @@
           width: 1280,
           height: 720,
           frameRate: 60,
-          maxBitrate: isCellular ? 1000000 : 3000000,
+          maxBitrate: isCellular ? 1500000 : 3000000,
           minBitrate: 250000,
-          startBitrate: 700000,
+          startBitrate: 900000,
           audioSampleRate: 48000,
           audioBitrate: 64000,
           degradation: 'maintain-framerate',
@@ -45,9 +45,9 @@
           width: 1280,
           height: 720,
           frameRate: 30,
-          maxBitrate: 800000,
+          maxBitrate: 1000000,
           minBitrate: 200000,
-          startBitrate: 500000,
+          startBitrate: 600000,
           audioSampleRate: 48000,
           audioBitrate: 48000,
           degradation: 'maintain-framerate',
@@ -59,9 +59,9 @@
           width: 854,
           height: 480,
           frameRate: 30,
-          maxBitrate: 450000,
+          maxBitrate: 600000,
           minBitrate: 150000,
-          startBitrate: 350000,
+          startBitrate: 400000,
           audioSampleRate: 48000,
           audioBitrate: 32000,
           degradation: 'maintain-framerate',
@@ -664,6 +664,20 @@
       iceCandidatePoolSize: 4
     };
 
+    const BASE_ICE = servers.iceServers.slice();
+    function validIce(list) {
+      return (Array.isArray(list) ? list : []).map((e) => {
+        const urls = [].concat((e && e.urls) || []).filter((u) => typeof u === 'string' && /^(stun|turns?):/.test(u) && !/:53(\?|$)/.test(u));
+        if (!urls.length) return null;
+        const o = { urls };
+        const isTurn = urls.some((u) => /^turns?:/.test(u));
+        if (isTurn) {
+          if (!e.username || !e.credential) return null;
+          o.username = e.username; o.credential = e.credential;
+        }
+        return o;
+      }).filter(Boolean);
+    }
     async function refreshTurn() {
       try {
         const c = new AbortController();
@@ -671,10 +685,8 @@
         const r = await fetch(GLITCH_WORKER_URL + '/turn-credentials', { signal: c.signal });
         clearTimeout(t);
         if (!r.ok || r.status === 204) return;
-        const d = await r.json();
-        if (d && Array.isArray(d.iceServers) && d.iceServers.length) {
-          servers.iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, ...d.iceServers];
-        }
+        const list = validIce((await r.json()).iceServers);
+        if (list.some((x) => x.username)) servers.iceServers = list;
       } catch (e) {}
     }
     const turnReady = refreshTurn();
@@ -735,8 +747,9 @@
       sdp.replace(/a=rtpmap:(\d+) (?:H264|VP8|VP9|AV1|H265)\//gi, (m, pt) => { vPts.add(pt); return m; });
       const om = sdp.match(/a=rtpmap:(\d+) opus\/48000/i);
       const opusPt = om ? om[1] : null;
+      const addPtime = !/a=ptime:/.test(sdp);
 
-      let out = sdp.replace(/a=fmtp:(\d+) ([^\r\n]*)/g, (line, pt, params) => {
+      const out = sdp.replace(/a=fmtp:(\d+) ([^\r\n]*)/g, (line, pt, params) => {
         if (vPts.has(pt)) {
           return `${line};x-google-start-bitrate=${startKbps};x-google-min-bitrate=${minKbps};x-google-max-bitrate=${maxKbps}`;
         }
@@ -744,13 +757,10 @@
           const kv = {};
           params.split(';').forEach((x) => { const [k, v] = x.split('='); if (k) kv[k.trim()] = v; });
           Object.assign(kv, { minptime: '10', useinbandfec: '1', usedtx: '0', stereo: '0', 'sprop-stereo': '0', cbr: '0', maxaveragebitrate: String(profile.audioBitrate || 48000) });
-          return 'a=fmtp:' + pt + ' ' + Object.entries(kv).map(([k, v]) => v === undefined ? k : k + '=' + v).join(';');
+          return 'a=fmtp:' + pt + ' ' + Object.entries(kv).map(([k, v]) => v === undefined ? k : k + '=' + v).join(';') + (addPtime ? '\r\na=ptime:10' : '');
         }
         return line;
       });
-      if (opusPt && !/a=ptime:/.test(out)) {
-        out = out.replace(new RegExp('(a=rtpmap:' + opusPt + ' opus/48000[^\\r\\n]*)', 'i'), '$1\r\na=ptime:10');
-      }
       return out;
     }
 
@@ -926,7 +936,7 @@
               const lc = stats.get(pair.localCandidateId), rc = stats.get(pair.remoteCandidateId);
               const isRelay = (lc && lc.candidateType === 'relay') || (rc && rc.candidateType === 'relay');
               hwInfo.pathType = isRelay ? 'RELAY' : 'DIRECT';
-              if (hwInfo.roundTripMs > (isRelay ? 150 : 120)) cpuOrBandwidthLimited = true;
+              if (hwInfo.roundTripMs > 220) cpuOrBandwidthLimited = true;
             }
 
             pc.getReceivers().forEach(r => {
@@ -949,7 +959,7 @@
         } else {
           congestionStrikes = 0;
         }
-      }, 2000);
+      }, 3000);
     }
 
     const hwHudBtn = document.getElementById('hwHudBtn');
@@ -1473,7 +1483,9 @@
     buzzAllBtnEl.onclick = () => sendBuzz('all', buzzAllBtnEl);
 
     function createPeer(targetUid) {
-      const pc = new RTCPeerConnection(servers);
+      let pc;
+      try { pc = new RTCPeerConnection(servers); }
+      catch (e) { pc = new RTCPeerConnection({ ...servers, iceServers: BASE_ICE }); }
       candidateQueues[targetUid] = [];
 
       if (localStream) {
