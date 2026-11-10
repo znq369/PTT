@@ -17,9 +17,9 @@
           width: 1920,
           height: 1080,
           frameRate: 60,
-          maxBitrate: isCellular ? 2200000 : 6000000,
+          maxBitrate: isCellular ? 3500000 : 6000000,
           minBitrate: 300000,
-          startBitrate: 1200000,
+          startBitrate: 1800000,
           audioSampleRate: 48000,
           audioBitrate: 96000,
           degradation: 'maintain-framerate',
@@ -31,9 +31,9 @@
           width: 1280,
           height: 720,
           frameRate: 60,
-          maxBitrate: isCellular ? 1500000 : 3000000,
+          maxBitrate: isCellular ? 2200000 : 3500000,
           minBitrate: 250000,
-          startBitrate: 900000,
+          startBitrate: 1400000,
           audioSampleRate: 48000,
           audioBitrate: 64000,
           degradation: 'maintain-framerate',
@@ -45,9 +45,9 @@
           width: 1280,
           height: 720,
           frameRate: 30,
-          maxBitrate: 1000000,
+          maxBitrate: 1400000,
           minBitrate: 200000,
-          startBitrate: 600000,
+          startBitrate: 900000,
           audioSampleRate: 48000,
           audioBitrate: 48000,
           degradation: 'maintain-framerate',
@@ -59,9 +59,9 @@
           width: 854,
           height: 480,
           frameRate: 30,
-          maxBitrate: 600000,
+          maxBitrate: 750000,
           minBitrate: 150000,
-          startBitrate: 400000,
+          startBitrate: 500000,
           audioSampleRate: 48000,
           audioBitrate: 32000,
           degradation: 'maintain-framerate',
@@ -769,7 +769,7 @@
       try {
         const isV = kind === 'video';
         const j = (isV ? hwInfo.videoJitterMs : hwInfo.audioJitterMs) || 0;
-        const ms = isV ? Math.max(30, Math.min(150, 3 * j + 15)) : Math.max(30, Math.min(100, 3 * j + 10));
+        const ms = isV ? Math.max(15, Math.min(120, 3 * j + 10)) : Math.max(30, Math.min(100, 3 * j + 10));
         if (!isV) hwInfo.playoutBufferMs = ms;
         if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = ms / 1000;
         if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = ms;
@@ -848,7 +848,7 @@
         const w = el.closest('.video-wrapper');
         const v = w && w.querySelector('video');
         const r = v && v.videoWidth ? v.videoWidth + '×' + v.videoHeight + ' • ' : '';
-        el.textContent = r + (hwInfo.pathType || '…') + ' • ' + hwInfo.roundTripMs + 'MS';
+        el.textContent = r + (hwInfo.pathType || '…') + ' • ' + hwInfo.roundTripMs + 'MS • ' + (hwInfo.rxFps || 0) + 'FPS';
       });
 
       const localResTag = document.getElementById('localResTag');
@@ -880,8 +880,9 @@
       const encEl = document.getElementById('hwEncoderVal');
       if (encEl) encEl.textContent = `${hwInfo.encoderType} • ${hwInfo.playoutBufferMs}ms Burst Buffer`;
 
+      const est = Math.round((hwInfo.roundTripMs || 0) / 2 + (hwInfo.bufMs || 0) + (hwInfo.decMs || 0) + 25);
       const netEl = document.getElementById('hwNetVal');
-      if (netEl) netEl.textContent = `${hwInfo.pathType || '…'} • ${hwInfo.roundTripMs}ms RTT • ${hwInfo.jitterMs}ms Jit • ${hwInfo.packetLossPct}% Loss`;
+      if (netEl) netEl.textContent = `${hwInfo.pathType || '…'} • ${hwInfo.roundTripMs}ms RTT • ${hwInfo.jitterMs}ms Jit • ${hwInfo.packetLossPct}% Loss • ${hwInfo.rxFps || 0}fps • ~${est}ms est`;
 
       const activeStreamEl = document.getElementById('hwActiveStreamVal');
       if (activeStreamEl) {
@@ -920,6 +921,17 @@
                 if (typeof report.jitter === 'number') {
                   hwInfo.jitterMs = Math.round(report.jitter * 1000);
                   if (report.kind === 'video') hwInfo.videoJitterMs = hwInfo.jitterMs; else hwInfo.audioJitterMs = hwInfo.jitterMs;
+                  if (report.kind === 'video') {
+                    hwInfo.rxFps = Math.round(report.framesPerSecond || 0);
+                    const pv = hwInfo._pv || {};
+                    const dc = (report.jitterBufferEmittedCount || 0) - (pv.c || 0);
+                    const dd = (report.jitterBufferDelay || 0) - (pv.d || 0);
+                    const df = (report.framesDecoded || 0) - (pv.f || 0);
+                    const dt = (report.totalDecodeTime || 0) - (pv.t || 0);
+                    if (dc > 0) hwInfo.bufMs = Math.round(1000 * dd / dc);
+                    if (df > 0) hwInfo.decMs = Math.round(1000 * dt / df);
+                    hwInfo._pv = { c: report.jitterBufferEmittedCount || 0, d: report.jitterBufferDelay || 0, f: report.framesDecoded || 0, t: report.totalDecodeTime || 0 };
+                  }
                 }
                 if (report.packetsReceived > 0 && typeof report.packetsLost === 'number') {
                   const total = report.packetsReceived + Math.max(0, report.packetsLost);
