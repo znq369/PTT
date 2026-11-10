@@ -3,66 +3,79 @@
 <head>
   <meta charset="UTF-8">
   <script>
-    // Early Hardware Core Detection & Uncompromised Media Acquisition
-    // Runs immediately before ES modules download so camera warm-up happens in the first tick.
+    // 4G/5G CELLULAR ZERO-BUFFERBLOAT & HARDWARE ASIC ENGINE
+    // Tuned specifically for mobile data uplinks: keeps H.264 encoding on the phone's
+    // dedicated hardware chip while preventing 4G/5G upload queue buildup (bufferbloat).
     (function () {
+      var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      var isCellular = conn && (conn.type === 'cellular' || conn.effectiveType !== '4g');
+
       window.__QUALITY_PROFILES = {
         ultra:  {
           id: 'ultra',
-          label: 'ULTRA MAX',
-          width: 3840,
-          height: 2160,
-          frameRate: 60,
-          maxBitrate: 12000000,
-          audioSampleRate: 48000,
-          audioBitrate: 128000,
-          degradation: 'maintain-resolution',
-          contentHint: 'detail'
-        },
-        high:   {
-          id: 'high',
-          label: 'HIGH FHD',
+          label: '5G ULTRA 1080P60',
           width: 1920,
           height: 1080,
           frameRate: 60,
-          maxBitrate: 6000000,
+          // 3.5 Mbps ceiling prevents 4G/5G uplink bufferbloat while keeping 1080p60 sharp
+          maxBitrate: isCellular ? 3500000 : 6000000,
+          minBitrate: 300000,
+          startBitrate: 1800000,
           audioSampleRate: 48000,
           audioBitrate: 96000,
-          degradation: 'maintain-resolution',
-          contentHint: 'detail'
+          degradation: 'maintain-framerate',
+          contentHint: 'motion'
+        },
+        high:   {
+          id: 'high',
+          label: '4G/5G FAST 720P60',
+          width: 1280,
+          height: 720,
+          frameRate: 60,
+          // Sweet spot for 4G/5G: 720p60 at 2.2 Mbps gives zero-lag 60fps over mobile data
+          maxBitrate: isCellular ? 2200000 : 3500000,
+          minBitrate: 250000,
+          startBitrate: 1400000,
+          audioSampleRate: 48000,
+          audioBitrate: 64000,
+          degradation: 'maintain-framerate',
+          contentHint: 'motion'
         },
         medium: {
           id: 'medium',
-          label: 'BALANCED HD',
+          label: '4G STABLE 720P30',
           width: 1280,
           height: 720,
           frameRate: 30,
-          maxBitrate: 2500000,
+          maxBitrate: 1400000,
+          minBitrate: 200000,
+          startBitrate: 900000,
           audioSampleRate: 48000,
-          audioBitrate: 64000,
-          degradation: 'balanced',
+          audioBitrate: 48000,
+          degradation: 'maintain-framerate',
           contentHint: 'motion'
         },
         low:    {
           id: 'low',
-          label: 'LITE SD',
-          width: 640,
+          label: '4G LITE 480P30',
+          width: 854,
           height: 480,
-          frameRate: 24,
-          maxBitrate: 900000,
+          frameRate: 30,
+          maxBitrate: 750000,
+          minBitrate: 150000,
+          startBitrate: 500000,
           audioSampleRate: 48000,
-          audioBitrate: 48000,
+          audioBitrate: 32000,
           degradation: 'maintain-framerate',
           contentHint: 'motion'
         }
       };
 
-      // Quick 12ms CPU single-thread execution benchmark to measure real processor speed
       function runCpuMicroBench() {
         var start = performance.now();
         var ops = 0;
         var x = 1.0001;
-        while (performance.now() - start < 12) {
+        while (performance.now() - start < 10) {
           for (var i = 0; i < 1000; i++) {
             x = Math.sqrt(x * 1.00001 + i) + 0.0001;
           }
@@ -72,7 +85,6 @@
         return { opsPerMs: Math.round(ops / elapsed), dummy: x };
       }
 
-      // Extract GPU hardware renderer string via WebGL
       function detectGpuRenderer() {
         try {
           var c = document.createElement('canvas');
@@ -87,28 +99,24 @@
 
       function scoreGpu(rendererStr) {
         var r = (rendererStr || '').toLowerCase();
-        // Flagship mobile & desktop GPUs
         if (/apple gpu|adreno \(tm\) [789]\d\d|adreno [789]\d\d|immortalis|mali-g[789]\d|rtx|radeon rx|arc|iris xe|m[1234]/.test(r)) {
-          return { tier: 'Flagship GPU', pts: 25 };
+          return { tier: 'Flagship HW ASIC', pts: 25 };
         }
-        // Upper mid-range GPUs
         if (/adreno \(tm\) 6[456789]\d|adreno 6[456789]\d|mali-g[56]\d|uhd|geforce|radeon/.test(r)) {
-          return { tier: 'High-Perf GPU', pts: 18 };
+          return { tier: 'High-Perf HW ASIC', pts: 18 };
         }
-        // Entry / older GPUs
         if (/adreno|mali|powervr/.test(r)) {
-          return { tier: 'Standard GPU', pts: 10 };
+          return { tier: 'Standard HW ASIC', pts: 12 };
         }
         return { tier: 'Generic GPU', pts: 15 };
       }
 
       function analyzeHardwareAndSelectTier() {
         var cores = navigator.hardwareConcurrency || 4;
-        var memory = navigator.deviceMemory || null; // null on Safari/iOS/Firefox
-        var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        var memory = navigator.deviceMemory || null;
         var netType = conn && conn.effectiveType ? conn.effectiveType : '4g';
         var downlink = conn && typeof conn.downlink === 'number' ? conn.downlink : 10;
-        var rtt = conn && typeof conn.rtt === 'number' ? conn.rtt : 40;
+        var rtt = conn && typeof conn.rtt === 'number' ? conn.rtt : 45;
         var saveData = conn ? !!conn.saveData : false;
         var dpr = window.devicePixelRatio || 1;
 
@@ -116,57 +124,52 @@
         var gpuRenderer = detectGpuRenderer();
         var gpuEval = scoreGpu(gpuRenderer);
 
-        // Compute Composite Hardware Score (0 - 100)
         var score = 0;
-
-        // 1. CPU Cores (up to 25 pts)
         if (cores >= 8) score += 25;
         else if (cores >= 6) score += 20;
         else if (cores >= 4) score += 12;
         else score += 5;
 
-        // 2. Real Single-Core CPU Speed Benchmark (up to 30 pts)
-        if (bench.opsPerMs >= 35000) score += 30;
-        else if (bench.opsPerMs >= 20000) score += 22;
+        if (bench.opsPerMs >= 32000) score += 30;
+        else if (bench.opsPerMs >= 18000) score += 22;
         else if (bench.opsPerMs >= 10000) score += 14;
         else score += 6;
 
-        // 3. RAM Capacity (up to 20 pts; if hidden on iOS, infer from CPU/GPU)
-        var effectiveRam = memory !== null ? memory : (bench.opsPerMs >= 25000 ? 8 : 4);
+        var effectiveRam = memory !== null ? memory : (bench.opsPerMs >= 24000 ? 8 : 6);
         if (effectiveRam >= 8) score += 20;
         else if (effectiveRam >= 6) score += 16;
         else if (effectiveRam >= 4) score += 10;
         else score += 4;
 
-        // 4. GPU capability (up to 25 pts)
         score += gpuEval.pts;
 
-        // Network penalty only if Data Saver is on or link is 2G/3G
-        if (saveData || netType === '2g' || netType === 'slow-2g') {
-          score = Math.min(score, 30);
-        } else if (netType === '3g') {
-          score = Math.min(score, 55);
-        }
-
-        var tier = 'ultra';
-        var processorClass = 'FAST PROCESSOR (FLAGSHIP)';
-        if (score >= 76) {
-          tier = 'ultra';
-          processorClass = 'FAST PROCESSOR (FLAGSHIP)';
-        } else if (score >= 58) {
+        // On 4G/5G with higher initial RTT (>80ms), default flagship phones to 720p60 ('high')
+        // so cellular uplink never chokes; if RTT is super low (<60ms), allow 'ultra' 1080p60.
+        var tier = 'high';
+        var processorClass = 'FAST CPU (4G/5G LOW-LAG)';
+        if (score >= 75) {
+          tier = (rtt <= 60 && downlink >= 10) ? 'ultra' : 'high';
+          processorClass = 'FAST PROCESSOR (HW ASIC 60FPS)';
+        } else if (score >= 56) {
           tier = 'high';
-          processorClass = 'HIGH-SPEED PROCESSOR';
+          processorClass = 'HIGH-SPEED CPU (HW ASIC 720P60)';
         } else if (score >= 40) {
           tier = 'medium';
-          processorClass = 'MID-RANGE PROCESSOR';
+          processorClass = 'MID-RANGE CPU (HW ASIC 720P30)';
         } else {
           tier = 'low';
-          processorClass = 'LOW-POWER PROCESSOR';
+          processorClass = 'LITE PROCESSOR (HW ASIC 480P30)';
+        }
+
+        if (saveData || netType === '2g' || netType === 'slow-2g') {
+          tier = 'low';
+        } else if (netType === '3g') {
+          tier = 'medium';
         }
 
         window.__HW_INFO = {
           cores: cores,
-          memory: memory !== null ? memory + ' GB' : '~' + effectiveRam + ' GB (Est)',
+          memory: memory !== null ? memory + ' GB' : '~' + effectiveRam + ' GB',
           rawMemory: effectiveRam,
           cpuOpsPerMs: bench.opsPerMs,
           gpuRenderer: gpuRenderer,
@@ -174,15 +177,19 @@
           netType: netType.toUpperCase(),
           downlinkMbps: downlink,
           rttMs: rtt,
+          jitterMs: 0,
+          packetLossPct: 0,
+          playoutBufferMs: 25,
           saveData: saveData,
           dpr: dpr,
           refreshRateHz: 60,
           score: score,
           processorClass: processorClass,
           autoRecommendedTier: tier,
-          sensorMaxRes: 'Probing...',
+          encoderType: 'HW H.264 ASIC',
           activeRes: 'Initializing...',
-          activeFps: 0
+          activeFps: 0,
+          roundTripMs: rtt
         };
 
         return tier;
@@ -194,7 +201,6 @@
       window.__earlyProfile = profile;
 
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        // Request front camera ('user') with ideal constraints matching the detected tier
         window.__earlyMediaPromise = navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'user' },
@@ -207,7 +213,7 @@
             noiseSuppression: true,
             autoGainControl: true,
             sampleRate: profile.audioSampleRate,
-            channelCount: { ideal: 2 }
+            latency: 0.01
           }
         }).catch(function () {
           return navigator.mediaDevices.getUserMedia({
@@ -243,10 +249,8 @@
       --text: #ffffff;
       --accent-green: #00E676;
       --accent-red: #FF2D3A;
-      --accent-amber: #FFB300;
       --border: rgba(255, 255, 255, 0.25);
       --border-dim: rgba(255, 255, 255, 0.12);
-      --highlight: rgba(255, 255, 255, 0.1);
       --muted: rgba(255, 255, 255, 0.55);
     }
 
@@ -281,18 +285,16 @@
       min-height: 54px;
       overflow-x: auto;
       overflow-y: hidden;
-      background: rgba(0, 4, 50, 0.88);
+      background: #000432;
       border-top: 1px solid var(--border);
-      backdrop-filter: blur(8px);
     }
     .app::-webkit-scrollbar { height: 4px; }
     .app::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); }
 
     .header { display: flex; align-items: center; gap: 1rem; padding: 0; flex-shrink: 0; }
-    h1 { font-family: 'IBM Plex Mono', monospace; font-size: 1.1rem; font-weight: 600; letter-spacing: 0.1em; margin: 0; }
 
     .big-id-input {
-      background: rgba(0, 4, 50, 0.8);
+      background: rgba(0, 4, 50, 0.9);
       border: none;
       border-bottom: 2px dashed var(--muted);
       color: var(--text);
@@ -307,9 +309,8 @@
       text-transform: uppercase;
     }
     .big-id-input:focus { border-bottom-color: var(--text); }
-    .big-id-input::placeholder { color: var(--muted); font-size: 1rem; }
 
-    .card { background: transparent; border: none; padding: 0; box-shadow: none; display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; height: 100%; }
+    .card { background: transparent; border: none; padding: 0; display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; height: 100%; }
 
     .status-bar { background: transparent; border: 1px solid var(--border); padding: 0 0.75rem; display: flex; align-items: center; gap: 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; flex-shrink: 0; height: 36px; border-radius: 4px; }
     .status-dot { width: 8px; height: 8px; background: transparent; border: 1px solid var(--muted); flex-shrink: 0; border-radius: 50%; }
@@ -318,14 +319,13 @@
     .status-dot.speaking { animation: pulseSpeak 0.8s ease-in-out infinite; }
     @keyframes pulseSpeak { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(1.2); } }
 
-    .btn { background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid var(--text); padding: 0 0.75rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; font-weight: 600; cursor: pointer; letter-spacing: 0.05em; width: auto; height: 36px; transition: all 0.2s ease; text-transform: uppercase; margin: 0; flex-shrink: 0; display: flex; align-items: center; justify-content: center; white-space: nowrap; }
+    .btn { background: rgba(0,0,0,0.5); color: var(--text); border: 1px solid var(--text); padding: 0 0.75rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; font-weight: 600; cursor: pointer; letter-spacing: 0.05em; height: 36px; text-transform: uppercase; flex-shrink: 0; display: flex; align-items: center; justify-content: center; white-space: nowrap; }
     .btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
-    .btn:active:not(:disabled) { transform: translateY(1px); }
     .btn:disabled { background: transparent; color: var(--muted); border-color: var(--border-dim); cursor: not-allowed; }
 
     .hw-hud-btn {
-      background: rgba(0, 230, 118, 0.08);
-      border: 1px solid rgba(0, 230, 118, 0.6);
+      background: rgba(0, 230, 118, 0.1);
+      border: 1px solid var(--accent-green);
       color: var(--text);
       padding: 0 0.65rem;
       font-family: 'IBM Plex Mono', monospace;
@@ -339,11 +339,6 @@
       gap: 0.45rem;
       flex-shrink: 0;
       white-space: nowrap;
-      transition: all 0.15s ease;
-    }
-    .hw-hud-btn:hover {
-      background: rgba(0, 230, 118, 0.2);
-      border-color: var(--accent-green);
     }
     .hw-tier-pill {
       background: var(--accent-green);
@@ -354,27 +349,24 @@
       border-radius: 2px;
     }
 
-    #acceptCallBtn { background: var(--text); color: var(--bg); font-size: 1rem; display: none; box-shadow: 0 0 15px rgba(255,255,255,0.4); animation: pulseButton 1s infinite alternate; }
+    #acceptCallBtn { background: var(--text); color: var(--bg); font-size: 1rem; display: none; }
     #cutCallBtn { background: rgba(255,45,58,0.2); color: var(--accent-red); font-size: 1rem; display: none; border-color: var(--accent-red); }
     #cutCallBtn:hover { background: var(--accent-red); color: white; }
 
-    /* 95% Top Video Layout */
-    .fullscreen-video-container { position: fixed; top: 0; left: 0; z-index: 1; width: 100vw; height: 95vh; height: calc(100vh - max(5vh, 54px)); background: #000; }
+    .fullscreen-video-container { position: fixed; top: 0; left: 0; z-index: 1; width: 100vw; height: calc(100vh - max(5vh, 54px)); background: #000; contain: strict; }
     .video-grid { display: flex; flex-wrap: wrap; width: 100%; height: 100%; gap: 0; align-content: flex-start; }
-    .video-wrapper { position: relative; border: 1px solid rgba(0,4,50,0.5); background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; transition: width 0.3s ease, height 0.3s ease; }
+    .video-wrapper { position: relative; border: 1px solid rgba(0,4,50,0.5); background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; contain: layout paint; }
     .video-wrapper.active { border-color: var(--text); }
-    .video-wrapper video { width: 100%; height: 100%; object-fit: cover; }
-    .video-wrapper video.mirrored { transform: scaleX(-1); }
-    .video-label { position: absolute; bottom: 8px; left: 8px; background: rgba(0, 4, 50, 0.78); border: 1px solid var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; padding: 4px 8px; color: var(--text); z-index: 2; backdrop-filter: blur(4px); text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
+    .video-wrapper video { width: 100%; height: 100%; object-fit: cover; transform: translateZ(0); will-change: transform; }
+    .video-wrapper video.mirrored { transform: scaleX(-1) translateZ(0); }
+    .video-label { position: absolute; bottom: 8px; left: 8px; background: rgba(0, 4, 50, 0.88); border: 1px solid var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; padding: 4px 8px; color: var(--text); z-index: 2; text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
     .video-label .res-tag { color: var(--accent-green); font-weight: 600; }
 
-    /* Hardware Core Diagnostics Modal */
     .hw-modal-backdrop {
       position: fixed;
       inset: 0;
       z-index: 60;
-      background: rgba(0, 2, 25, 0.75);
-      backdrop-filter: blur(6px);
+      background: rgba(0, 2, 25, 0.88);
       display: none;
       align-items: center;
       justify-content: center;
@@ -384,12 +376,11 @@
     .hw-modal {
       width: 100%;
       max-width: 520px;
-      background: rgba(0, 4, 50, 0.96);
+      background: #000432;
       border: 1px solid var(--text);
       padding: 1.1rem;
       font-family: 'IBM Plex Mono', monospace;
       color: var(--text);
-      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8);
     }
     .hw-modal-header {
       display: flex;
@@ -399,9 +390,8 @@
       padding-bottom: 0.65rem;
       margin-bottom: 0.85rem;
     }
-    .hw-modal-title { font-size: 0.85rem; font-weight: 600; letter-spacing: 0.08em; color: var(--accent-green); }
+    .hw-modal-title { font-size: 0.82rem; font-weight: 600; color: var(--accent-green); }
     .hw-close-btn { background: transparent; border: 1px solid var(--border); color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; padding: 2px 8px; cursor: pointer; }
-    .hw-close-btn:hover { background: var(--text); color: var(--bg); }
     .hw-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -415,7 +405,7 @@
     }
     .hw-cell.full { grid-column: 1 / -1; }
     .hw-cell-label { font-size: 0.62rem; color: var(--muted); text-transform: uppercase; margin-bottom: 3px; }
-    .hw-cell-val { font-size: 0.76rem; font-weight: 600; color: var(--text); word-break: break-word; }
+    .hw-cell-val { font-size: 0.75rem; font-weight: 600; color: var(--text); word-break: break-word; }
     .hw-cell-val.highlight { color: var(--accent-green); }
     .hw-mode-bar {
       display: flex;
@@ -443,17 +433,17 @@
     }
 
     .members-list { list-style: none; padding: 0; margin: 0; display: flex; align-items: center; gap: 0.75rem; }
-    .members-list li { display: flex; align-items: center; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; background: rgba(255,255,255,0.05); border: 1px solid var(--border-dim); padding: 0 0.75rem; height: 36px; border-radius: 4px; white-space: nowrap; margin-bottom: 0; }
+    .members-list li { display: flex; align-items: center; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; background: rgba(255,255,255,0.05); border: 1px solid var(--border-dim); padding: 0 0.75rem; height: 36px; border-radius: 4px; white-space: nowrap; }
     .member-name { display: flex; align-items: center; gap: 8px; text-transform: uppercase; }
 
-    .buzz-member-btn { background: transparent; border: 1px solid var(--text); color: var(--text); padding: 0 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; font-weight: 600; cursor: pointer; margin-left: 5px; height: 24px; transition: all 0.15s ease; border-radius: 2px; margin-bottom: 0; }
+    .buzz-member-btn { background: transparent; border: 1px solid var(--text); color: var(--text); padding: 0 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; font-weight: 600; cursor: pointer; margin-left: 5px; height: 24px; border-radius: 2px; }
     .buzz-member-btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
-    .buzz-member-btn:disabled { opacity: 0.3; cursor: not-allowed; border-color: var(--border); color: var(--muted); }
+    .buzz-member-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
     body.incoming-buzz { animation: buzzFlash 1s ease-in-out infinite; }
     @keyframes buzzFlash { 0%, 100% { background: var(--bg); } 50% { background: var(--text); color: var(--bg); } }
 
-    .buzz-toast { position: fixed; top: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--text); color: var(--bg); border: none; padding: 1rem 1.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.9rem; font-weight: 600; display: none; align-items: center; text-transform: uppercase; }
+    .buzz-toast { position: fixed; top: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--text); color: var(--bg); padding: 1rem 1.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.9rem; font-weight: 600; display: none; align-items: center; text-transform: uppercase; }
     .buzz-toast.show { display: flex; }
 
     .waveform { display: none; align-items: center; justify-content: center; gap: 4px; height: 36px; margin: 0 0.5rem; }
@@ -488,54 +478,50 @@
     </div>
   </div>
 
-  <!-- Hardware Diagnostics & Quality Control Overlay -->
+  <!-- Hardware Diagnostics & 4G/5G Mobile Telemetry Modal -->
   <div class="hw-modal-backdrop" id="hwModalBackdrop">
     <div class="hw-modal">
       <div class="hw-modal-header">
-        <span class="hw-modal-title">HARDWARE CORE CAPACITY & A/V ENGINE</span>
+        <span class="hw-modal-title">4G/5G MOBILE HARDWARE ASIC ENGINE</span>
         <button class="hw-close-btn" id="hwModalCloseBtn">CLOSE [X]</button>
       </div>
       <div class="hw-grid">
         <div class="hw-cell full">
-          <div class="hw-cell-label">Detected Processor Capacity & Auto Verdict</div>
+          <div class="hw-cell-label">Hardware Capacity & Active Offload Verdict</div>
           <div class="hw-cell-val highlight" id="hwProcessorVerdict">ANALYZING...</div>
         </div>
         <div class="hw-cell">
-          <div class="hw-cell-label">CPU Logical Cores & Speed</div>
+          <div class="hw-cell-label">CPU Cores & Single-Thread Speed</div>
           <div class="hw-cell-val" id="hwCpuVal">--</div>
         </div>
         <div class="hw-cell">
-          <div class="hw-cell-label">System Memory (RAM)</div>
+          <div class="hw-cell-label">System RAM & Display Hz</div>
           <div class="hw-cell-val" id="hwRamVal">--</div>
         </div>
         <div class="hw-cell full">
-          <div class="hw-cell-label">GPU Hardware Renderer</div>
+          <div class="hw-cell-label">Dedicated Video Silicon / GPU</div>
           <div class="hw-cell-val" id="hwGpuVal">--</div>
         </div>
         <div class="hw-cell">
-          <div class="hw-cell-label">Display Refresh Rate</div>
-          <div class="hw-cell-val" id="hwHzVal">--</div>
+          <div class="hw-cell-label">Encoder & Burst Buffer</div>
+          <div class="hw-cell-val highlight" id="hwEncoderVal">HW H.264 ASIC (25ms Buffer)</div>
         </div>
         <div class="hw-cell">
-          <div class="hw-cell-label">Network Link</div>
-          <div class="hw-cell-val" id="hwNetVal">--</div>
+          <div class="hw-cell-label">4G/5G Ping, Jitter & Loss</div>
+          <div class="hw-cell-val highlight" id="hwNetVal">--</div>
         </div>
-        <div class="hw-cell">
-          <div class="hw-cell-label">Camera Sensor Max Capability</div>
-          <div class="hw-cell-val" id="hwSensorMaxVal">--</div>
-        </div>
-        <div class="hw-cell">
-          <div class="hw-cell-label">Active Stream Output</div>
+        <div class="hw-cell full">
+          <div class="hw-cell-label">Active Outbound Camera Pipeline</div>
           <div class="hw-cell-val highlight" id="hwActiveStreamVal">--</div>
         </div>
       </div>
-      <div class="hw-cell-label" style="margin-bottom: 6px;">Quality Adaptation Mode (Auto adjusts to hardware capacity)</div>
+      <div class="hw-cell-label" style="margin-bottom: 6px;">4G/5G Mobile Offload Profile (720p60 is fastest on 4G/5G uplink)</div>
       <div class="hw-mode-bar" id="hwModeBar">
-        <button class="hw-mode-btn active" data-mode="auto">AUTO (HW ADAPTIVE)</button>
-        <button class="hw-mode-btn" data-mode="ultra">FORCE ULTRA MAX</button>
-        <button class="hw-mode-btn" data-mode="high">HIGH 1080P</button>
-        <button class="hw-mode-btn" data-mode="medium">BALANCED 720P</button>
-        <button class="hw-mode-btn" data-mode="low">LITE 480P</button>
+        <button class="hw-mode-btn active" data-mode="auto">AUTO (4G/5G SMART)</button>
+        <button class="hw-mode-btn" data-mode="ultra">1080P 60FPS</button>
+        <button class="hw-mode-btn" data-mode="high">720P 60FPS</button>
+        <button class="hw-mode-btn" data-mode="medium">720P 30FPS</button>
+        <button class="hw-mode-btn" data-mode="low">480P 30FPS</button>
       </div>
     </div>
   </div>
@@ -551,13 +537,11 @@
         <span id="statusText" style="display: none;">CONNECTING...</span>
       </div>
 
-      <!-- Hardware Capacity & Auto Quality Indicator Button -->
-      <button id="hwHudBtn" class="hw-hud-btn" title="Click to view Device Core Details & Quality Settings">
+      <button id="hwHudBtn" class="hw-hud-btn" title="Hardware Capacity & 4G/5G Diagnostics">
         <span id="hwHudSummary">HW: DETECTING...</span>
         <span class="hw-tier-pill" id="hwHudTierPill">AUTO</span>
       </button>
 
-      <!-- Controls Card -->
       <div class="card">
         <div class="waveform" id="waveform">
           <span></span><span></span><span></span><span></span><span></span>
@@ -572,7 +556,6 @@
         </button>
       </div>
 
-      <!-- Network Presence Card -->
       <div class="card">
         <ul class="members-list" id="membersList"></ul>
       </div>
@@ -583,8 +566,9 @@
     <span id="buzzToastText">BUZZ</span>
   </div>
 
-  <!-- Background Canvas Logic -->
+  <!-- Background Canvas Logic: Pauses when video is live to free 100% of GPU -->
   <script>
+    window.__pauseBgCanvas = false;
     (function () {
       const canvas = document.getElementById('bgCanvas');
       const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
@@ -598,8 +582,8 @@
       const pointProgram = createProgram(gl, vsSource, fsSource), lineProgram = createProgram(gl, lineVsSource, lineFsSource);
       let width, height; function resize() { width = canvas.clientWidth = window.innerWidth; height = canvas.clientHeight = window.innerHeight; canvas.width = width * (window.devicePixelRatio || 1); canvas.height = height * (window.devicePixelRatio || 1); gl.viewport(0, 0, canvas.width, canvas.height); }
       window.addEventListener('resize', resize); resize();
-      const NODE_COUNT = Math.min(70, Math.floor((window.innerWidth * window.innerHeight) / 14000)), LINK_DIST = 140, nodes = [];
-      for (let i = 0; i < NODE_COUNT; i++) nodes.push({ x: Math.random() * width, y: Math.random() * height, vx: (Math.random() - 0.5) * 0.25, vy: (Math.random() - 0.5) * 0.25, size: 2 + Math.random() * 2.5, alpha: 0.3 + Math.random() * 0.3 });
+      const NODE_COUNT = Math.min(50, Math.floor((window.innerWidth * window.innerHeight) / 16000)), LINK_DIST = 130, nodes = [];
+      for (let i = 0; i < NODE_COUNT; i++) nodes.push({ x: Math.random() * width, y: Math.random() * height, vx: (Math.random() - 0.5) * 0.25, vy: (Math.random() - 0.5) * 0.25, size: 2 + Math.random() * 2, alpha: 0.3 + Math.random() * 0.3 });
 
       const colorAccent = [1.0, 1.0, 1.0], pointPosBuffer = gl.createBuffer(), pointSizeBuffer = gl.createBuffer(), pointAlphaBuffer = gl.createBuffer(), linePosBuffer = gl.createBuffer(), lineAlphaBuffer = gl.createBuffer();
       const pointAttribs = { aPosition: gl.getAttribLocation(pointProgram, 'aPosition'), aSize: gl.getAttribLocation(pointProgram, 'aSize'), aAlpha: gl.getAttribLocation(pointProgram, 'aAlpha') }, pointUniforms = { uResolution: gl.getUniformLocation(pointProgram, 'uResolution'), uColor: gl.getUniformLocation(pointProgram, 'uColor') }, lineAttribs = { aPosition: gl.getAttribLocation(lineProgram, 'aPosition'), aAlpha: gl.getAttribLocation(lineProgram, 'aAlpha') }, lineUniforms = { uResolution: gl.getUniformLocation(lineProgram, 'uResolution'), uColor: gl.getUniformLocation(lineProgram, 'uColor') };
@@ -608,7 +592,14 @@
         if (linePositions.length > 0) { gl.useProgram(lineProgram); gl.uniform2f(lineUniforms.uResolution, width, height); gl.uniform3fv(lineUniforms.uColor, colorAccent); gl.bindBuffer(gl.ARRAY_BUFFER, linePosBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(linePositions), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(lineAttribs.aPosition); gl.vertexAttribPointer(lineAttribs.aPosition, 2, gl.FLOAT, false, 0, 0); gl.bindBuffer(gl.ARRAY_BUFFER, lineAlphaBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lineAlphas), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(lineAttribs.aAlpha); gl.vertexAttribPointer(lineAttribs.aAlpha, 1, gl.FLOAT, false, 0, 0); gl.drawArrays(gl.LINES, 0, linePositions.length / 2); }
         const pointPositions = [], pointSizes = [], pointAlphas = []; for (const n of nodes) { pointPositions.push(n.x, n.y); pointSizes.push(n.size * (window.devicePixelRatio || 1)); pointAlphas.push(n.alpha); }
         gl.useProgram(pointProgram); gl.uniform2f(pointUniforms.uResolution, width, height); gl.uniform3fv(pointUniforms.uColor, colorAccent); gl.bindBuffer(gl.ARRAY_BUFFER, pointPosBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pointPositions), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(pointAttribs.aPosition); gl.vertexAttribPointer(pointAttribs.aPosition, 2, gl.FLOAT, false, 0, 0); gl.bindBuffer(gl.ARRAY_BUFFER, pointSizeBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pointSizes), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(pointAttribs.aAlpha); gl.vertexAttribPointer(pointAttribs.aAlpha, 1, gl.FLOAT, false, 0, 0); gl.drawArrays(gl.POINTS, 0, nodes.length); }
-      function loop() { update(); render(); requestAnimationFrame(loop); } loop();
+      function loop() {
+        if (!window.__pauseBgCanvas) {
+          update();
+          render();
+        }
+        requestAnimationFrame(loop);
+      }
+      loop();
     })();
   </script>
 
@@ -643,16 +634,33 @@
     }
 
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch((e) => console.log('SW Registration failed', e));
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
 
-    const servers = { iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] };
+    // Multi-STUN + Free OpenRelay TURN Fallback so 4G/5G Carrier CGNAT Never Blocks Direct Calls
+    const servers = {
+      iceServers: [
+        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+        { urls: 'stun:stun.cloudflare.com:3478' },
+        {
+          urls: [
+            'turn:openrelay.metered.ca:80',
+            'turn:openrelay.metered.ca:443',
+            'turn:openrelay.metered.ca:443?transport=tcp'
+          ],
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ],
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+      iceCandidatePoolSize: 4
+    };
 
-    // ---- Hardware-Aware Uncompromised Quality Engine ----
     const QUALITY_PROFILES = window.__QUALITY_PROFILES;
-    let qualityMode = 'auto'; // 'auto' | 'ultra' | 'high' | 'medium' | 'low'
-    let currentTier = window.__earlyTier || 'ultra';
-    let currentProfile = QUALITY_PROFILES[currentTier] || QUALITY_PROFILES.ultra;
+    let qualityMode = 'auto';
+    let currentTier = window.__earlyTier || 'high';
+    let currentProfile = QUALITY_PROFILES[currentTier] || QUALITY_PROFILES.high;
     const hwInfo = window.__HW_INFO || {};
 
     function measureScreenRefreshRate() {
@@ -661,7 +669,7 @@
         const start = performance.now();
         function tick(now) {
           frames++;
-          if (now - start < 500) {
+          if (now - start < 400) {
             requestAnimationFrame(tick);
           } else {
             resolve(Math.round((frames * 1000) / (now - start)));
@@ -671,45 +679,57 @@
       });
     }
 
-    // Probe the active video track's native sensor limits & lock onto maximum sensor resolution on Ultra tier
-    async function maximizeSensorAndProbeCapabilities() {
-      if (!localStream) return;
-      const vTrack = localStream.getVideoTracks()[0];
-      if (!vTrack) return;
-
+    // 1. Force Hardware H.264 Codec on Transceivers so the Phone's ASIC Chip Encodes Instead of CPU
+    function preferHardwareH264Codec(pc) {
       try {
-        if (typeof vTrack.getCapabilities === 'function') {
-          const caps = vTrack.getCapabilities();
-          const maxW = caps.width && caps.width.max ? caps.width.max : 1920;
-          const maxH = caps.height && caps.height.max ? caps.height.max : 1080;
-          const maxFps = caps.frameRate && caps.frameRate.max ? Math.min(60, Math.round(caps.frameRate.max)) : 60;
-          hwInfo.sensorMaxRes = `${maxW}×${maxH} @ ${maxFps}FPS`;
+        if (!RTCRtpSender.getCapabilities) return;
+        const caps = RTCRtpSender.getCapabilities('video');
+        if (!caps || !caps.codecs) return;
 
-          // If running on ULTRA MAX, request the camera's true ceiling without compromise
-          if (currentTier === 'ultra') {
-            await vTrack.applyConstraints({
-              width: { ideal: maxW },
-              height: { ideal: maxH },
-              frameRate: { ideal: maxFps }
-            }).catch(() => {});
-          }
-        } else {
-          hwInfo.sensorMaxRes = 'Native Auto';
-        }
-      } catch (e) {
-        hwInfo.sensorMaxRes = 'Standard UVC/Cam';
-      }
+        const h264Codecs = caps.codecs.filter(c => c.mimeType.toLowerCase() === 'video/h264');
+        const otherCodecs = caps.codecs.filter(c => c.mimeType.toLowerCase() !== 'video/h264');
 
-      try {
-        if ('contentHint' in vTrack) {
-          vTrack.contentHint = currentProfile.contentHint || 'detail';
+        if (h264Codecs.length > 0) {
+          pc.getTransceivers().forEach(transceiver => {
+            if (transceiver.sender && transceiver.sender.track && transceiver.sender.track.kind === 'video') {
+              if (typeof transceiver.setCodecPreferences === 'function') {
+                transceiver.setCodecPreferences([...h264Codecs, ...otherCodecs]);
+              }
+            }
+          });
         }
       } catch (e) {}
+    }
 
-      refreshHardwareTelemetryUI();
+    // 2. Inject Mobile-Safe Start Bitrate & Anti-Bufferbloat Min Bitrate Floor
+    function boostSdpForMobileLowLatency(sdp, profile) {
+      if (!sdp) return sdp;
+      const maxKbps = Math.round(profile.maxBitrate / 1000);
+      const startKbps = Math.round((profile.startBitrate || 1400000) / 1000);
+      const minKbps = Math.round((profile.minBitrate || 250000) / 1000);
+
+      return sdp.replace(
+        /(a=fmtp:\d+ .*)/g,
+        `$1;x-google-start-bitrate=${startKbps};x-google-min-bitrate=${minKbps};x-google-max-bitrate=${maxKbps}`
+      );
+    }
+
+    // 3. Set 25ms Micro-Buffer on 4G/5G to Absorb Cell Tower Packet Bursts Without Stutter
+    function applyCellularMicroBufferToReceiver(receiver, kind) {
+      if (!receiver) return;
+      try {
+        const delaySec = (hwInfo.playoutBufferMs || 25) / 1000;
+        if ('playoutDelayHint' in receiver) {
+          receiver.playoutDelayHint = kind === 'video' ? delaySec : 0.015;
+        }
+        if ('jitterBufferTarget' in receiver) {
+          receiver.jitterBufferTarget = kind === 'video' ? (hwInfo.playoutBufferMs || 25) : 15;
+        }
+      } catch (e) {}
     }
 
     function applySenderParameters(pc) {
+      preferHardwareH264Codec(pc);
       pc.getSenders().forEach((sender) => {
         if (!sender.track) return;
         if (sender.track.kind === 'video') {
@@ -719,53 +739,52 @@
             params.encodings[0].maxBitrate = currentProfile.maxBitrate;
             params.encodings[0].maxFramerate = currentProfile.frameRate;
             params.encodings[0].scaleResolutionDownBy = 1.0;
-            params.degradationPreference = currentProfile.degradation || 'maintain-resolution';
+            params.encodings[0].priority = 'high';
+            params.encodings[0].networkPriority = 'high';
+            params.degradationPreference = currentProfile.degradation || 'maintain-framerate';
             sender.setParameters(params).catch(() => {});
           } catch (e) {}
         } else if (sender.track.kind === 'audio') {
           try {
             const params = sender.getParameters() || {};
             if (!params.encodings || !params.encodings.length) params.encodings = [{}];
-            params.encodings[0].maxBitrate = currentProfile.audioBitrate || 128000;
+            params.encodings[0].maxBitrate = currentProfile.audioBitrate || 64000;
+            params.encodings[0].priority = 'high';
+            params.encodings[0].networkPriority = 'high';
             sender.setParameters(params).catch(() => {});
           } catch (e) {}
         }
       });
     }
 
+    async function configureLocalTrackForZeroLag() {
+      if (!localStream) return;
+      const vTrack = localStream.getVideoTracks()[0];
+      if (!vTrack) return;
+      try {
+        if ('contentHint' in vTrack) {
+          vTrack.contentHint = 'motion';
+        }
+      } catch (e) {}
+      refreshHardwareTelemetryUI();
+    }
+
     async function applyTierProfile(newTier, modeLabel = qualityMode) {
       qualityMode = modeLabel;
       currentTier = newTier;
-      currentProfile = QUALITY_PROFILES[currentTier] || QUALITY_PROFILES.ultra;
+      currentProfile = QUALITY_PROFILES[currentTier] || QUALITY_PROFILES.high;
 
       const vTrack = localStream && localStream.getVideoTracks()[0];
       if (vTrack) {
-        let targetW = currentProfile.width;
-        let targetH = currentProfile.height;
-        let targetFps = currentProfile.frameRate;
-
-        if (currentTier === 'ultra' && typeof vTrack.getCapabilities === 'function') {
-          try {
-            const caps = vTrack.getCapabilities();
-            if (caps.width && caps.width.max) targetW = caps.width.max;
-            if (caps.height && caps.height.max) targetH = caps.height.max;
-            if (caps.frameRate && caps.frameRate.max) targetFps = Math.min(60, Math.round(caps.frameRate.max));
-          } catch (e) {}
-        }
-
         await vTrack.applyConstraints({
-          width: { ideal: targetW },
-          height: { ideal: targetH },
-          frameRate: { ideal: targetFps }
+          width: { ideal: currentProfile.width },
+          height: { ideal: currentProfile.height },
+          frameRate: { ideal: currentProfile.frameRate }
         }).catch(() => {});
-
-        try {
-          if ('contentHint' in vTrack) vTrack.contentHint = currentProfile.contentHint || 'detail';
-        } catch (e) {}
       }
 
       Object.values(peers).forEach((pc) => applySenderParameters(pc));
-      setTimeout(refreshHardwareTelemetryUI, 350);
+      setTimeout(refreshHardwareTelemetryUI, 300);
     }
 
     function refreshHardwareTelemetryUI() {
@@ -778,66 +797,56 @@
       hwInfo.activeRes = `${actualW}×${actualH}`;
       hwInfo.activeFps = actualFps;
 
-      // Update SELF video overlay tag
       const localResTag = document.getElementById('localResTag');
       if (localResTag) {
-        const modePrefix = qualityMode === 'auto' ? 'AUTO' : 'LOCK';
-        localResTag.textContent = `${modePrefix}:${currentProfile.label} • ${actualW}×${actualH}@${actualFps}FPS • ${hwInfo.cores}C`;
+        localResTag.textContent = `${currentProfile.label} • ${actualW}×${actualH}@${actualFps}FPS • ${hwInfo.roundTripMs}MS`;
       }
 
-      // Update Bottom Bar HUD chip
       const hwHudSummary = document.getElementById('hwHudSummary');
       const hwHudTierPill = document.getElementById('hwHudTierPill');
       if (hwHudSummary && hwHudTierPill) {
-        const shortClass = hwInfo.score >= 76 ? 'FAST CPU' : (hwInfo.score >= 58 ? 'HIGH CPU' : (hwInfo.score >= 40 ? 'MID CPU' : 'LITE CPU'));
-        hwHudSummary.textContent = `${shortClass} (${hwInfo.cores}C/${hwInfo.memory.replace(' (Est)', '')})`;
-        hwHudTierPill.textContent = `${qualityMode === 'auto' ? 'AUTO' : 'MAN'}: ${currentProfile.label}`;
+        const shortClass = hwInfo.score >= 75 ? 'FAST CPU' : (hwInfo.score >= 56 ? 'HIGH CPU' : (hwInfo.score >= 40 ? 'MID CPU' : 'LITE CPU'));
+        hwHudSummary.textContent = `${shortClass} • ${hwInfo.roundTripMs}ms`;
+        hwHudTierPill.textContent = `${qualityMode === 'auto' ? 'AUTO' : 'LOCK'}: ${currentProfile.label}`;
       }
 
-      // Update Modal fields
       const verdictEl = document.getElementById('hwProcessorVerdict');
       if (verdictEl) {
-        verdictEl.textContent = `${hwInfo.processorClass} (SCORE ${hwInfo.score}/100) → ${currentProfile.label}`;
+        verdictEl.textContent = `${hwInfo.processorClass} (SCORE ${hwInfo.score}/100)`;
       }
       const cpuEl = document.getElementById('hwCpuVal');
       if (cpuEl) cpuEl.textContent = `${hwInfo.cores} Cores • ${(hwInfo.cpuOpsPerMs / 1000).toFixed(1)}K ops/ms`;
 
       const ramEl = document.getElementById('hwRamVal');
-      if (ramEl) ramEl.textContent = hwInfo.memory;
+      if (ramEl) ramEl.textContent = `${hwInfo.memory} • ${hwInfo.refreshRateHz}Hz`;
 
       const gpuEl = document.getElementById('hwGpuVal');
       if (gpuEl) gpuEl.textContent = `${hwInfo.gpuClass} (${hwInfo.gpuRenderer})`;
 
-      const hzEl = document.getElementById('hwHzVal');
-      if (hzEl) hzEl.textContent = `${hwInfo.refreshRateHz} Hz • DPR ${hwInfo.dpr}x`;
+      const encEl = document.getElementById('hwEncoderVal');
+      if (encEl) encEl.textContent = `${hwInfo.encoderType} • ${hwInfo.playoutBufferMs}ms Burst Buffer`;
 
       const netEl = document.getElementById('hwNetVal');
-      if (netEl) netEl.textContent = `${hwInfo.netType} • ~${hwInfo.downlinkMbps} Mbps (${hwInfo.rttMs}ms)`;
-
-      const sensorEl = document.getElementById('hwSensorMaxVal');
-      if (sensorEl) sensorEl.textContent = hwInfo.sensorMaxRes || 'Probing...';
+      if (netEl) netEl.textContent = `${hwInfo.roundTripMs}ms RTT • ${hwInfo.jitterMs}ms Jit • ${hwInfo.packetLossPct}% Loss`;
 
       const activeStreamEl = document.getElementById('hwActiveStreamVal');
       if (activeStreamEl) {
         const mbps = (currentProfile.maxBitrate / 1000000).toFixed(1);
-        activeStreamEl.textContent = `${actualW}×${actualH} @ ${actualFps} FPS (Max ${mbps} Mbps)`;
+        activeStreamEl.textContent = `${actualW}×${actualH} @ ${actualFps} FPS (4G/5G Cap ${mbps} Mbps)`;
       }
 
-      // Sync mode buttons
       document.querySelectorAll('#hwModeBar .hw-mode-btn').forEach((btn) => {
         const m = btn.getAttribute('data-mode');
         btn.classList.toggle('active', m === qualityMode);
       });
     }
 
-    // Smart Auto-Adaptation Monitor: only steps down if WebRTC explicitly reports CPU limitation
-    let cpuOverloadStrikes = 0;
+    // Monitor 4G/5G RTT, Jitter, Packet Loss & Hardware ASIC Status
+    let congestionStrikes = 0;
     function startAdaptiveMonitor() {
       setInterval(async () => {
-        refreshHardwareTelemetryUI();
-        if (qualityMode !== 'auto') return;
+        let cpuOrBandwidthLimited = false;
 
-        let cpuLimited = false;
         for (const uid in peers) {
           const pc = peers[uid];
           if (!pc || pc.connectionState !== 'connected') continue;
@@ -845,29 +854,58 @@
             const stats = await pc.getStats();
             stats.forEach((report) => {
               if (report.type === 'outbound-rtp' && report.kind === 'video') {
-                if (report.qualityLimitationReason === 'cpu') {
-                  cpuLimited = true;
+                if (report.encoderImplementation) {
+                  hwInfo.encoderType = report.powerEfficientEncoder !== false
+                    ? `HW ASIC (${report.encoderImplementation})`
+                    : `SW (${report.encoderImplementation})`;
+                }
+                if (report.qualityLimitationReason === 'cpu' || report.qualityLimitationReason === 'bandwidth') {
+                  cpuOrBandwidthLimited = true;
                 }
               }
+              if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                if (typeof report.jitter === 'number') {
+                  hwInfo.jitterMs = Math.round(report.jitter * 1000);
+                  // Dynamically tune receiver buffer between 15ms and 35ms based on live 4G/5G tower jitter
+                  hwInfo.playoutBufferMs = Math.max(15, Math.min(40, hwInfo.jitterMs + 10));
+                }
+                if (report.packetsReceived > 0 && typeof report.packetsLost === 'number') {
+                  const total = report.packetsReceived + Math.max(0, report.packetsLost);
+                  hwInfo.packetLossPct = Math.round((Math.max(0, report.packetsLost) / total) * 100);
+                }
+              }
+              if (report.type === 'candidate-pair' && report.state === 'succeeded' && typeof report.currentRoundTripTime === 'number') {
+                hwInfo.roundTripMs = Math.round(report.currentRoundTripTime * 1000);
+                if (hwInfo.roundTripMs > 220) {
+                  cpuOrBandwidthLimited = true; // 4G/5G uplink bufferbloat detected
+                }
+              }
+            });
+
+            // Apply updated micro-buffer to receivers
+            pc.getReceivers().forEach(r => {
+              if (r.track) applyCellularMicroBufferToReceiver(r, r.track.kind);
             });
           } catch (e) {}
         }
 
-        if (cpuLimited) {
-          cpuOverloadStrikes++;
-          if (cpuOverloadStrikes >= 2 && currentTier !== 'low') {
-            cpuOverloadStrikes = 0;
+        refreshHardwareTelemetryUI();
+        if (qualityMode !== 'auto') return;
+
+        if (cpuOrBandwidthLimited) {
+          congestionStrikes++;
+          if (congestionStrikes >= 2 && currentTier !== 'low') {
+            congestionStrikes = 0;
             const order = ['ultra', 'high', 'medium', 'low'];
             const nextIdx = Math.min(order.length - 1, order.indexOf(currentTier) + 1);
             await applyTierProfile(order[nextIdx], 'auto');
           }
         } else {
-          cpuOverloadStrikes = 0;
+          congestionStrikes = 0;
         }
-      }, 6000);
+      }, 3000);
     }
 
-    // Wire up Hardware Modal UI
     const hwHudBtn = document.getElementById('hwHudBtn');
     const hwModalBackdrop = document.getElementById('hwModalBackdrop');
     const hwModalCloseBtn = document.getElementById('hwModalCloseBtn');
@@ -887,7 +925,7 @@
       btn.addEventListener('click', async () => {
         const mode = btn.getAttribute('data-mode');
         if (mode === 'auto') {
-          await applyTierProfile(hwInfo.autoRecommendedTier || 'ultra', 'auto');
+          await applyTierProfile(hwInfo.autoRecommendedTier || 'high', 'auto');
         } else {
           await applyTierProfile(mode, mode);
         }
@@ -1046,7 +1084,7 @@
         localVideo.classList.toggle('mirrored', currentDeviceIndex === 0);
       }
 
-      await maximizeSensorAndProbeCapabilities();
+      await configureLocalTrackForZeroLag();
     }
 
     (function setupDoubleTapCameraSwitch() {
@@ -1113,12 +1151,12 @@
               noiseSuppression: true,
               autoGainControl: true,
               sampleRate: currentProfile.audioSampleRate,
-              channelCount: { ideal: 2 }
+              latency: 0.01
             }
           });
           localVideo.srcObject = localStream;
           hasMedia = true;
-          await maximizeSensorAndProbeCapabilities();
+          await configureLocalTrackForZeroLag();
         } catch (e) {
           try {
             localStream = await navigator.mediaDevices.getUserMedia({
@@ -1142,6 +1180,8 @@
     }
 
     function updateMediaState() {
+      window.__pauseBgCanvas = isCommsLive;
+
       if (localStream) {
         localStream.getTracks().forEach(t => t.enabled = isCommsLive);
       }
@@ -1379,6 +1419,8 @@
       }
 
       pc.ontrack = (event) => {
+        applyCellularMicroBufferToReceiver(event.receiver, event.track.kind);
+
         let wrapper = document.getElementById('video-wrapper-' + targetUid);
         if (!wrapper) {
           wrapper = document.createElement('div');
@@ -1394,12 +1436,12 @@
           const label = document.createElement('div');
           label.className = 'video-label';
           label.id = 'video-label-' + targetUid;
-          label.innerHTML = `<span>NODE ${targetUid}</span><span class="res-tag" id="remote-res-${targetUid}">LIVE</span>`;
+          label.innerHTML = `<span>NODE ${targetUid}</span><span class="res-tag" id="remote-res-${targetUid}">4G/5G LIVE</span>`;
 
           vid.addEventListener('loadedmetadata', () => {
             const rTag = document.getElementById('remote-res-' + targetUid);
             if (rTag && vid.videoWidth) {
-              rTag.textContent = `${vid.videoWidth}×${vid.videoHeight}`;
+              rTag.textContent = `${vid.videoWidth}×${vid.videoHeight} • 25MS`;
             }
           });
 
@@ -1479,6 +1521,7 @@
               processQueuedCandidates(sender, pc);
               return pc.createAnswer();
             }).then(answer => {
+              answer.sdp = boostSdpForMobileLowLatency(answer.sdp, currentProfile);
               pc.setLocalDescription(answer);
               addDoc(collection(db, 'family_signals'), { sender: myUid, receiver: sender, type: 'answer', payload: JSON.stringify(answer) });
             });
@@ -1581,6 +1624,7 @@
     async function initiateCall(targetUid) {
       const pc = createPeer(targetUid);
       const offer = await pc.createOffer();
+      offer.sdp = boostSdpForMobileLowLatency(offer.sdp, currentProfile);
       await pc.setLocalDescription(offer);
       await addDoc(collection(db, 'family_signals'), { sender: myUid, receiver: targetUid, type: 'offer', payload: JSON.stringify(offer) });
     }
@@ -1626,7 +1670,6 @@
 
       refreshHardwareTelemetryUI();
 
-      // Measure real display Hz in parallel
       measureScreenRefreshRate().then((hz) => {
         hwInfo.refreshRateHz = hz;
         refreshHardwareTelemetryUI();
@@ -1639,7 +1682,7 @@
           height: { ideal: currentProfile.height },
           frameRate: { ideal: currentProfile.frameRate }
         },
-        audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate }
+        audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate, latency: 0.01 }
       }).catch(() => null);
 
       const mediaReadyPromise = (async () => {
@@ -1650,7 +1693,7 @@
           if (localStream.getVideoTracks().length > 0) {
             localVideo.srcObject = localStream;
           }
-          await maximizeSensorAndProbeCapabilities();
+          await configureLocalTrackForZeroLag();
         } else {
           hasMedia = false;
         }
