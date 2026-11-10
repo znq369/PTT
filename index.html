@@ -3,51 +3,221 @@
 <head>
   <meta charset="UTF-8">
   <script>
-    // Fires the camera/mic request in the very first possible tick - before the Firebase-based
-    // app script further down has even started downloading its (large, network-fetched) ES module
-    // dependencies. That module script cannot execute a single line, including its own
-    // getUserMedia() call, until those imports resolve, so acquiring the camera here instead means
-    // the permission prompt / hardware warm-up starts milliseconds after the link is opened rather
-    // than after Firebase has loaded.
+    // Early Hardware Core Detection & Uncompromised Media Acquisition
+    // Runs immediately before ES modules download so camera warm-up happens in the first tick.
     (function () {
       window.__QUALITY_PROFILES = {
-        low:    { width: 480,  height: 360, frameRate: 15, maxBitrate: 350000,  audioSampleRate: 24000 },
-        medium: { width: 960,  height: 540, frameRate: 20, maxBitrate: 1200000, audioSampleRate: 48000 },
-        high:   { width: 1280, height: 720, frameRate: 24, maxBitrate: 3000000, audioSampleRate: 48000 }
+        ultra:  {
+          id: 'ultra',
+          label: 'ULTRA MAX',
+          width: 3840,
+          height: 2160,
+          frameRate: 60,
+          maxBitrate: 12000000,
+          audioSampleRate: 48000,
+          audioBitrate: 128000,
+          degradation: 'maintain-resolution',
+          contentHint: 'detail'
+        },
+        high:   {
+          id: 'high',
+          label: 'HIGH FHD',
+          width: 1920,
+          height: 1080,
+          frameRate: 60,
+          maxBitrate: 6000000,
+          audioSampleRate: 48000,
+          audioBitrate: 96000,
+          degradation: 'maintain-resolution',
+          contentHint: 'detail'
+        },
+        medium: {
+          id: 'medium',
+          label: 'BALANCED HD',
+          width: 1280,
+          height: 720,
+          frameRate: 30,
+          maxBitrate: 2500000,
+          audioSampleRate: 48000,
+          audioBitrate: 64000,
+          degradation: 'balanced',
+          contentHint: 'motion'
+        },
+        low:    {
+          id: 'low',
+          label: 'LITE SD',
+          width: 640,
+          height: 480,
+          frameRate: 24,
+          maxBitrate: 900000,
+          audioSampleRate: 48000,
+          audioBitrate: 48000,
+          degradation: 'maintain-framerate',
+          contentHint: 'motion'
+        }
       };
 
-      function detectDeviceTierEarly() {
-        var cores = navigator.hardwareConcurrency || 2;
-        var memory = navigator.deviceMemory || 4; // undefined on iOS/Firefox, assume mid-range
+      // Quick 12ms CPU single-thread execution benchmark to measure real processor speed
+      function runCpuMicroBench() {
+        var start = performance.now();
+        var ops = 0;
+        var x = 1.0001;
+        while (performance.now() - start < 12) {
+          for (var i = 0; i < 1000; i++) {
+            x = Math.sqrt(x * 1.00001 + i) + 0.0001;
+          }
+          ops += 1000;
+        }
+        var elapsed = Math.max(1, performance.now() - start);
+        return { opsPerMs: Math.round(ops / elapsed), dummy: x };
+      }
+
+      // Extract GPU hardware renderer string via WebGL
+      function detectGpuRenderer() {
+        try {
+          var c = document.createElement('canvas');
+          var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+          if (!gl) return 'Unavailable';
+          var dbg = gl.getExtension('WEBGL_debug_renderer_info');
+          return dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+        } catch (e) {
+          return 'Standard GPU';
+        }
+      }
+
+      function scoreGpu(rendererStr) {
+        var r = (rendererStr || '').toLowerCase();
+        // Flagship mobile & desktop GPUs
+        if (/apple gpu|adreno \(tm\) [789]\d\d|adreno [789]\d\d|immortalis|mali-g[789]\d|rtx|radeon rx|arc|iris xe|m[1234]/.test(r)) {
+          return { tier: 'Flagship GPU', pts: 25 };
+        }
+        // Upper mid-range GPUs
+        if (/adreno \(tm\) 6[456789]\d|adreno 6[456789]\d|mali-g[56]\d|uhd|geforce|radeon/.test(r)) {
+          return { tier: 'High-Perf GPU', pts: 18 };
+        }
+        // Entry / older GPUs
+        if (/adreno|mali|powervr/.test(r)) {
+          return { tier: 'Standard GPU', pts: 10 };
+        }
+        return { tier: 'Generic GPU', pts: 15 };
+      }
+
+      function analyzeHardwareAndSelectTier() {
+        var cores = navigator.hardwareConcurrency || 4;
+        var memory = navigator.deviceMemory || null; // null on Safari/iOS/Firefox
         var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-        var netType = conn ? conn.effectiveType : '4g';
+        var netType = conn && conn.effectiveType ? conn.effectiveType : '4g';
+        var downlink = conn && typeof conn.downlink === 'number' ? conn.downlink : 10;
+        var rtt = conn && typeof conn.rtt === 'number' ? conn.rtt : 40;
         var saveData = conn ? !!conn.saveData : false;
+        var dpr = window.devicePixelRatio || 1;
 
+        var bench = runCpuMicroBench();
+        var gpuRenderer = detectGpuRenderer();
+        var gpuEval = scoreGpu(gpuRenderer);
+
+        // Compute Composite Hardware Score (0 - 100)
         var score = 0;
-        if (cores >= 6) score += 2; else if (cores >= 4) score += 1;
-        if (memory >= 6) score += 2; else if (memory >= 4) score += 1;
-        if (netType === '4g') score += 1;
-        if (saveData || netType === '2g' || netType === 'slow-2g') score -= 2;
 
-        var tier = 'medium';
-        if (score <= 1) tier = 'low';
-        else if (score >= 4) tier = 'high';
+        // 1. CPU Cores (up to 25 pts)
+        if (cores >= 8) score += 25;
+        else if (cores >= 6) score += 20;
+        else if (cores >= 4) score += 12;
+        else score += 5;
+
+        // 2. Real Single-Core CPU Speed Benchmark (up to 30 pts)
+        if (bench.opsPerMs >= 35000) score += 30;
+        else if (bench.opsPerMs >= 20000) score += 22;
+        else if (bench.opsPerMs >= 10000) score += 14;
+        else score += 6;
+
+        // 3. RAM Capacity (up to 20 pts; if hidden on iOS, infer from CPU/GPU)
+        var effectiveRam = memory !== null ? memory : (bench.opsPerMs >= 25000 ? 8 : 4);
+        if (effectiveRam >= 8) score += 20;
+        else if (effectiveRam >= 6) score += 16;
+        else if (effectiveRam >= 4) score += 10;
+        else score += 4;
+
+        // 4. GPU capability (up to 25 pts)
+        score += gpuEval.pts;
+
+        // Network penalty only if Data Saver is on or link is 2G/3G
+        if (saveData || netType === '2g' || netType === 'slow-2g') {
+          score = Math.min(score, 30);
+        } else if (netType === '3g') {
+          score = Math.min(score, 55);
+        }
+
+        var tier = 'ultra';
+        var processorClass = 'FAST PROCESSOR (FLAGSHIP)';
+        if (score >= 76) {
+          tier = 'ultra';
+          processorClass = 'FAST PROCESSOR (FLAGSHIP)';
+        } else if (score >= 58) {
+          tier = 'high';
+          processorClass = 'HIGH-SPEED PROCESSOR';
+        } else if (score >= 40) {
+          tier = 'medium';
+          processorClass = 'MID-RANGE PROCESSOR';
+        } else {
+          tier = 'low';
+          processorClass = 'LOW-POWER PROCESSOR';
+        }
+
+        window.__HW_INFO = {
+          cores: cores,
+          memory: memory !== null ? memory + ' GB' : '~' + effectiveRam + ' GB (Est)',
+          rawMemory: effectiveRam,
+          cpuOpsPerMs: bench.opsPerMs,
+          gpuRenderer: gpuRenderer,
+          gpuClass: gpuEval.tier,
+          netType: netType.toUpperCase(),
+          downlinkMbps: downlink,
+          rttMs: rtt,
+          saveData: saveData,
+          dpr: dpr,
+          refreshRateHz: 60,
+          score: score,
+          processorClass: processorClass,
+          autoRecommendedTier: tier,
+          sensorMaxRes: 'Probing...',
+          activeRes: 'Initializing...',
+          activeFps: 0
+        };
+
         return tier;
       }
 
-      var tier = detectDeviceTierEarly();
+      var tier = analyzeHardwareAndSelectTier();
       var profile = window.__QUALITY_PROFILES[tier];
       window.__earlyTier = tier;
       window.__earlyProfile = profile;
 
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        // Request front camera ('user') with ideal constraints matching the detected tier
         window.__earlyMediaPromise = navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: profile.width }, height: { ideal: profile.height }, frameRate: { ideal: profile.frameRate, max: profile.frameRate } },
-          audio: { echoCancellation: true, noiseSuppression: true, sampleRate: profile.audioSampleRate }
+          video: {
+            facingMode: { ideal: 'user' },
+            width: { ideal: profile.width },
+            height: { ideal: profile.height },
+            frameRate: { ideal: profile.frameRate }
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: profile.audioSampleRate,
+            channelCount: { ideal: 2 }
+          }
+        }).catch(function () {
+          return navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: { echoCancellation: true, noiseSuppression: true }
+          });
         }).catch(function () {
           return navigator.mediaDevices.getUserMedia({
             video: false,
-            audio: { echoCancellation: true, noiseSuppression: true, sampleRate: profile.audioSampleRate }
+            audio: { echoCancellation: true, noiseSuppression: true }
           });
         }).catch(function () {
           return null;
@@ -59,7 +229,7 @@
   </script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Live Line - Tactical A/V</title>
-  
+
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#000432">
   <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3114/3114320.png">
@@ -71,119 +241,224 @@
     :root {
       --bg: #000432;
       --text: #ffffff;
+      --accent-green: #00E676;
+      --accent-red: #FF2D3A;
+      --accent-amber: #FFB300;
       --border: rgba(255, 255, 255, 0.25);
-      --border-dim: rgba(255, 255, 255, 0.1);
+      --border-dim: rgba(255, 255, 255, 0.12);
       --highlight: rgba(255, 255, 255, 0.1);
-      --muted: rgba(255, 255, 255, 0.5);
+      --muted: rgba(255, 255, 255, 0.55);
     }
 
     body {
-          font-family: 'IBM Plex Sans', sans-serif;
-          background: var(--bg);
-          color: var(--text);
-          height: 100vh;
-          margin: 0;
-          padding: 0;
-          touch-action: manipulation;
-          overflow: hidden;
-        }
-    
-        #bgCanvas {
-          position: fixed;
-          inset: 0;
-          width: 100%;
-          height: 100%;
-          z-index: 0;
-          display: block;
-          opacity: 0.7;
-        }
-    
-        .app {
-                  position: fixed;
-                  bottom: 0;
-                  left: 0;
-                  z-index: 10;
-                  width: 100vw;
-                  height: 5vh;
-                  min-height: 54px;
-                  overflow-x: auto;
-                  overflow-y: hidden;
-                  background: rgba(0, 4, 50, 0.85);
-                  border-top: 1px solid var(--border);
-                  backdrop-filter: blur(8px);
-                }
-                .app::-webkit-scrollbar { height: 6px; }
-                .app::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); }
-                
-                .header { display: flex; align-items: center; gap: 1rem; padding: 0; flex-shrink: 0; }
-                .logo { display: flex; align-items: center; gap: 0.5rem; margin: 0; }
-                .logo-icon { width: 28px; height: 28px; background: rgba(0, 4, 50, 0.8); border: 2px solid var(--text); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
-                        .logo-icon svg { color: var(--text); width: 14px; height: 14px; }
-                        h1 { font-family: 'IBM Plex Mono', monospace; font-size: 1.1rem; font-weight: 600; letter-spacing: 0.1em; margin: 0; }
-                        
-                        .big-id-input {
-                          background: rgba(0, 4, 50, 0.8);
-                          border: none;
-                          border-bottom: 2px dashed var(--muted);
-                          color: var(--text);
-                          font-family: 'IBM Plex Mono', monospace;
-                          font-size: 1.2rem;
-                          font-weight: 600;
-                          text-align: center;
-                          width: 60px;
-                          margin: 0;
-                          padding: 0.1rem;
-                          outline: none;
-                          text-transform: uppercase;
-                        }
-                        .big-id-input:focus { border-bottom-color: var(--text); }
-                        .big-id-input::placeholder { color: var(--muted); font-size: 1rem; }
-                        
-                        .card { background: transparent; border: none; padding: 0; box-shadow: none; display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; height: 100%; }
-                        .card-label { display: none; }
-                        
-                        .status-bar { background: transparent; border: 1px solid var(--border); padding: 0 0.75rem; display: flex; align-items: center; gap: 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; flex-shrink: 0; height: 36px; border-radius: 4px; }
-                        .status-dot { width: 8px; height: 8px; background: transparent; border: 1px solid var(--muted); flex-shrink: 0; border-radius: 50%; }
-                        .status-dot.connected { background: var(--text); border-color: var(--text); }
-                        .status-dot.error { background: transparent; border: 1px dashed var(--muted); }
-                        .status-dot.speaking { animation: pulseSpeak 0.8s ease-in-out infinite; }
-                        @keyframes pulseSpeak { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(1.2); } }
-                        
-                        .btn { background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid var(--text); padding: 0 0.75rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; font-weight: 600; cursor: pointer; letter-spacing: 0.05em; width: auto; height: 36px; transition: all 0.2s ease; text-transform: uppercase; margin: 0; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
-                .btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
-                .btn:active:not(:disabled) { transform: translateY(1px); }
-                .btn:disabled { background: transparent; color: var(--muted); border-color: var(--border-dim); cursor: not-allowed; }
-                
-                #acceptCallBtn { background: var(--text); color: var(--bg); font-size: 1rem; display: none; box-shadow: 0 0 15px rgba(255,255,255,0.4); animation: pulseButton 1s infinite alternate; }
-                #cutCallBtn { background: rgba(255,68,68,0.2); color: #ff4444; font-size: 1rem; display: none; border-color: #ff4444; }
-                #cutCallBtn:hover { background: #ff4444; color: white; }
-                
-                /* 95% Top Video Layout */
-                        .fullscreen-video-container { position: fixed; top: 0; left: 0; z-index: 1; width: 100vw; height: 95vh; height: calc(100vh - max(5vh, 54px)); background: #000; }
-                        .video-grid { display: flex; flex-wrap: wrap; width: 100%; height: 100%; gap: 0; align-content: flex-start; }
-                .video-wrapper { position: relative; border: 1px solid rgba(0,4,50,0.5); background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; transition: width 0.3s ease, height 0.3s ease; }
-                .video-wrapper.active { border-color: var(--text); }
-                .video-wrapper video { width: 100%; height: 100%; object-fit: cover; }
-                .video-wrapper video.mirrored { transform: scaleX(-1); }
-                .video-label { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,0.6); border: 1px solid var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; padding: 4px 8px; color: var(--text); z-index: 2; backdrop-filter: blur(2px); text-transform: uppercase; }
-        
-            .members-list { list-style: none; padding: 0; margin: 0; display: flex; align-items: center; gap: 0.75rem; }
-                    .members-list li { display: flex; align-items: center; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; background: rgba(255,255,255,0.05); border: 1px solid var(--border-dim); padding: 0 0.75rem; height: 36px; border-radius: 4px; white-space: nowrap; margin-bottom: 0; }
-                    .member-name { display: flex; align-items: center; gap: 8px; text-transform: uppercase; }
-                    
-                    .buzz-member-btn { background: transparent; border: 1px solid var(--text); color: var(--text); padding: 0 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; font-weight: 600; cursor: pointer; margin-left: 5px; height: 24px; transition: all 0.15s ease; border-radius: 2px; margin-bottom: 0; }
-                    .buzz-member-btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
-                    .buzz-member-btn:disabled { opacity: 0.3; cursor: not-allowed; border-color: var(--border); color: var(--muted); }
-                    
-                    body.incoming-buzz { animation: buzzFlash 1s ease-in-out infinite; }
-                    @keyframes buzzFlash { 0%, 100% { background: var(--bg); } 50% { background: var(--text); color: var(--bg); } }
-                    
-                    .buzz-toast { position: fixed; top: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--text); color: var(--bg); border: none; padding: 1rem 1.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.9rem; font-weight: 600; display: none; align-items: center; text-transform: uppercase; }
-                    .buzz-toast.show { display: flex; }
-            
-                    .waveform { display: none; align-items: center; justify-content: center; gap: 4px; height: 36px; margin: 0 0.5rem; }
+      font-family: 'IBM Plex Sans', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      margin: 0;
+      padding: 0;
+      touch-action: manipulation;
+      overflow: hidden;
+    }
+
+    #bgCanvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      display: block;
+      opacity: 0.7;
+    }
+
+    .app {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      z-index: 10;
+      width: 100vw;
+      height: 5vh;
+      min-height: 54px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      background: rgba(0, 4, 50, 0.88);
+      border-top: 1px solid var(--border);
+      backdrop-filter: blur(8px);
+    }
+    .app::-webkit-scrollbar { height: 4px; }
+    .app::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); }
+
+    .header { display: flex; align-items: center; gap: 1rem; padding: 0; flex-shrink: 0; }
+    h1 { font-family: 'IBM Plex Mono', monospace; font-size: 1.1rem; font-weight: 600; letter-spacing: 0.1em; margin: 0; }
+
+    .big-id-input {
+      background: rgba(0, 4, 50, 0.8);
+      border: none;
+      border-bottom: 2px dashed var(--muted);
+      color: var(--text);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 1.2rem;
+      font-weight: 600;
+      text-align: center;
+      width: 60px;
+      margin: 0;
+      padding: 0.1rem;
+      outline: none;
+      text-transform: uppercase;
+    }
+    .big-id-input:focus { border-bottom-color: var(--text); }
+    .big-id-input::placeholder { color: var(--muted); font-size: 1rem; }
+
+    .card { background: transparent; border: none; padding: 0; box-shadow: none; display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; height: 100%; }
+
+    .status-bar { background: transparent; border: 1px solid var(--border); padding: 0 0.75rem; display: flex; align-items: center; gap: 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; flex-shrink: 0; height: 36px; border-radius: 4px; }
+    .status-dot { width: 8px; height: 8px; background: transparent; border: 1px solid var(--muted); flex-shrink: 0; border-radius: 50%; }
+    .status-dot.connected { background: var(--accent-green); border-color: var(--accent-green); }
+    .status-dot.error { background: transparent; border: 1px dashed var(--muted); }
+    .status-dot.speaking { animation: pulseSpeak 0.8s ease-in-out infinite; }
+    @keyframes pulseSpeak { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(1.2); } }
+
+    .btn { background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid var(--text); padding: 0 0.75rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; font-weight: 600; cursor: pointer; letter-spacing: 0.05em; width: auto; height: 36px; transition: all 0.2s ease; text-transform: uppercase; margin: 0; flex-shrink: 0; display: flex; align-items: center; justify-content: center; white-space: nowrap; }
+    .btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn:disabled { background: transparent; color: var(--muted); border-color: var(--border-dim); cursor: not-allowed; }
+
+    .hw-hud-btn {
+      background: rgba(0, 230, 118, 0.08);
+      border: 1px solid rgba(0, 230, 118, 0.6);
+      color: var(--text);
+      padding: 0 0.65rem;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.7rem;
+      font-weight: 600;
+      height: 36px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      flex-shrink: 0;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+    }
+    .hw-hud-btn:hover {
+      background: rgba(0, 230, 118, 0.2);
+      border-color: var(--accent-green);
+    }
+    .hw-tier-pill {
+      background: var(--accent-green);
+      color: var(--bg);
+      padding: 2px 5px;
+      font-size: 0.65rem;
+      font-weight: 600;
+      border-radius: 2px;
+    }
+
+    #acceptCallBtn { background: var(--text); color: var(--bg); font-size: 1rem; display: none; box-shadow: 0 0 15px rgba(255,255,255,0.4); animation: pulseButton 1s infinite alternate; }
+    #cutCallBtn { background: rgba(255,45,58,0.2); color: var(--accent-red); font-size: 1rem; display: none; border-color: var(--accent-red); }
+    #cutCallBtn:hover { background: var(--accent-red); color: white; }
+
+    /* 95% Top Video Layout */
+    .fullscreen-video-container { position: fixed; top: 0; left: 0; z-index: 1; width: 100vw; height: 95vh; height: calc(100vh - max(5vh, 54px)); background: #000; }
+    .video-grid { display: flex; flex-wrap: wrap; width: 100%; height: 100%; gap: 0; align-content: flex-start; }
+    .video-wrapper { position: relative; border: 1px solid rgba(0,4,50,0.5); background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; transition: width 0.3s ease, height 0.3s ease; }
+    .video-wrapper.active { border-color: var(--text); }
+    .video-wrapper video { width: 100%; height: 100%; object-fit: cover; }
+    .video-wrapper video.mirrored { transform: scaleX(-1); }
+    .video-label { position: absolute; bottom: 8px; left: 8px; background: rgba(0, 4, 50, 0.78); border: 1px solid var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; padding: 4px 8px; color: var(--text); z-index: 2; backdrop-filter: blur(4px); text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
+    .video-label .res-tag { color: var(--accent-green); font-weight: 600; }
+
+    /* Hardware Core Diagnostics Modal */
+    .hw-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      background: rgba(0, 2, 25, 0.75);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .hw-modal-backdrop.open { display: flex; }
+    .hw-modal {
+      width: 100%;
+      max-width: 520px;
+      background: rgba(0, 4, 50, 0.96);
+      border: 1px solid var(--text);
+      padding: 1.1rem;
+      font-family: 'IBM Plex Mono', monospace;
+      color: var(--text);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8);
+    }
+    .hw-modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.65rem;
+      margin-bottom: 0.85rem;
+    }
+    .hw-modal-title { font-size: 0.85rem; font-weight: 600; letter-spacing: 0.08em; color: var(--accent-green); }
+    .hw-close-btn { background: transparent; border: 1px solid var(--border); color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; padding: 2px 8px; cursor: pointer; }
+    .hw-close-btn:hover { background: var(--text); color: var(--bg); }
+    .hw-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.55rem;
+      margin-bottom: 0.9rem;
+    }
+    .hw-cell {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border-dim);
+      padding: 0.5rem 0.65rem;
+    }
+    .hw-cell.full { grid-column: 1 / -1; }
+    .hw-cell-label { font-size: 0.62rem; color: var(--muted); text-transform: uppercase; margin-bottom: 3px; }
+    .hw-cell-val { font-size: 0.76rem; font-weight: 600; color: var(--text); word-break: break-word; }
+    .hw-cell-val.highlight { color: var(--accent-green); }
+    .hw-mode-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      padding-top: 0.65rem;
+      border-top: 1px solid var(--border-dim);
+    }
+    .hw-mode-btn {
+      flex: 1 1 auto;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.68rem;
+      font-weight: 600;
+      padding: 0.45rem 0.5rem;
+      cursor: pointer;
+      text-transform: uppercase;
+    }
+    .hw-mode-btn.active {
+      background: var(--accent-green);
+      color: var(--bg);
+      border-color: var(--accent-green);
+    }
+
+    .members-list { list-style: none; padding: 0; margin: 0; display: flex; align-items: center; gap: 0.75rem; }
+    .members-list li { display: flex; align-items: center; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; background: rgba(255,255,255,0.05); border: 1px solid var(--border-dim); padding: 0 0.75rem; height: 36px; border-radius: 4px; white-space: nowrap; margin-bottom: 0; }
+    .member-name { display: flex; align-items: center; gap: 8px; text-transform: uppercase; }
+
+    .buzz-member-btn { background: transparent; border: 1px solid var(--text); color: var(--text); padding: 0 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; font-weight: 600; cursor: pointer; margin-left: 5px; height: 24px; transition: all 0.15s ease; border-radius: 2px; margin-bottom: 0; }
+    .buzz-member-btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
+    .buzz-member-btn:disabled { opacity: 0.3; cursor: not-allowed; border-color: var(--border); color: var(--muted); }
+
+    body.incoming-buzz { animation: buzzFlash 1s ease-in-out infinite; }
+    @keyframes buzzFlash { 0%, 100% { background: var(--bg); } 50% { background: var(--text); color: var(--bg); } }
+
+    .buzz-toast { position: fixed; top: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--text); color: var(--bg); border: none; padding: 1rem 1.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.9rem; font-weight: 600; display: none; align-items: center; text-transform: uppercase; }
+    .buzz-toast.show { display: flex; }
+
+    .waveform { display: none; align-items: center; justify-content: center; gap: 4px; height: 36px; margin: 0 0.5rem; }
     .waveform.active { display: flex; }
-    .waveform span { display: block; width: 4px; background: var(--text); animation: wave 1.2s ease-in-out infinite; }
+    .waveform span { display: block; width: 4px; background: var(--accent-green); animation: wave 1.2s ease-in-out infinite; }
     .waveform span:nth-child(1) { height: 10px; animation-delay: 0s; }
     .waveform span:nth-child(2) { height: 22px; animation-delay: 0.1s; }
     .waveform span:nth-child(3) { height: 32px; animation-delay: 0.2s; }
@@ -201,47 +476,108 @@
   <canvas id="bgCanvas"></canvas>
 
   <!-- Full Screen Video Grid Layer -->
-    <div id="videoCard" class="fullscreen-video-container" style="display: none;">
-      <div class="video-grid" id="videoGrid">
-        <div class="video-wrapper" id="localVideoWrapper">
-          <video id="localVideo" class="mirrored" autoplay playsinline muted></video>
-          <div class="video-label">SELF</div>
+  <div id="videoCard" class="fullscreen-video-container" style="display: none;">
+    <div class="video-grid" id="videoGrid">
+      <div class="video-wrapper" id="localVideoWrapper">
+        <video id="localVideo" class="mirrored" autoplay playsinline muted></video>
+        <div class="video-label" id="localVideoLabel">
+          <span>SELF</span>
+          <span class="res-tag" id="localResTag">INIT...</span>
         </div>
       </div>
     </div>
-  
-    <div class="app">
-          <div id="channelScreen" style="display: flex; flex-direction: row; gap: 1.5rem; align-items: center; height: 100%; width: max-content; padding: 0 1.5rem; margin: 0 auto;">
-                  <div class="header">
-                    <input type="text" id="myIdInput" class="big-id-input" placeholder="INIT...">
-                  </div>
-          
-                  <div class="status-bar" id="statusBar" title="Connection Status">
-                    <div class="status-dot connected"></div>
-                    <span id="statusText" style="display: none;">CONNECTING...</span>
-                  </div>
-          
-                  <!-- Controls Card -->
-                  <div class="card">
-                    <div class="waveform" id="waveform">
-                      <span></span><span></span><span></span><span></span><span></span>
-                    </div>
-                    <button id="acceptCallBtn" class="btn">ACCEPT</button>
-                    <button id="cutCallBtn" class="btn">MUTE</button>
-                    <button id="buzzAllBtn" class="btn" title="GLOBAL BUZZ" style="padding: 0 1rem; display: none;">
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M22 17H2c0-1.5 1.5-2.5 1.5-2.5V10a8.5 8.5 0 0 1 17 0v4.5S22 15.5 22 17z"></path>
-                        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
-                      </svg>
-                    </button>
-                  </div>
-            
-            <!-- Network Presence Card -->
-            <div class="card">
-              <ul class="members-list" id="membersList"></ul>
-            </div>
-          </div>
+  </div>
+
+  <!-- Hardware Diagnostics & Quality Control Overlay -->
+  <div class="hw-modal-backdrop" id="hwModalBackdrop">
+    <div class="hw-modal">
+      <div class="hw-modal-header">
+        <span class="hw-modal-title">HARDWARE CORE CAPACITY & A/V ENGINE</span>
+        <button class="hw-close-btn" id="hwModalCloseBtn">CLOSE [X]</button>
+      </div>
+      <div class="hw-grid">
+        <div class="hw-cell full">
+          <div class="hw-cell-label">Detected Processor Capacity & Auto Verdict</div>
+          <div class="hw-cell-val highlight" id="hwProcessorVerdict">ANALYZING...</div>
         </div>
+        <div class="hw-cell">
+          <div class="hw-cell-label">CPU Logical Cores & Speed</div>
+          <div class="hw-cell-val" id="hwCpuVal">--</div>
+        </div>
+        <div class="hw-cell">
+          <div class="hw-cell-label">System Memory (RAM)</div>
+          <div class="hw-cell-val" id="hwRamVal">--</div>
+        </div>
+        <div class="hw-cell full">
+          <div class="hw-cell-label">GPU Hardware Renderer</div>
+          <div class="hw-cell-val" id="hwGpuVal">--</div>
+        </div>
+        <div class="hw-cell">
+          <div class="hw-cell-label">Display Refresh Rate</div>
+          <div class="hw-cell-val" id="hwHzVal">--</div>
+        </div>
+        <div class="hw-cell">
+          <div class="hw-cell-label">Network Link</div>
+          <div class="hw-cell-val" id="hwNetVal">--</div>
+        </div>
+        <div class="hw-cell">
+          <div class="hw-cell-label">Camera Sensor Max Capability</div>
+          <div class="hw-cell-val" id="hwSensorMaxVal">--</div>
+        </div>
+        <div class="hw-cell">
+          <div class="hw-cell-label">Active Stream Output</div>
+          <div class="hw-cell-val highlight" id="hwActiveStreamVal">--</div>
+        </div>
+      </div>
+      <div class="hw-cell-label" style="margin-bottom: 6px;">Quality Adaptation Mode (Auto adjusts to hardware capacity)</div>
+      <div class="hw-mode-bar" id="hwModeBar">
+        <button class="hw-mode-btn active" data-mode="auto">AUTO (HW ADAPTIVE)</button>
+        <button class="hw-mode-btn" data-mode="ultra">FORCE ULTRA MAX</button>
+        <button class="hw-mode-btn" data-mode="high">HIGH 1080P</button>
+        <button class="hw-mode-btn" data-mode="medium">BALANCED 720P</button>
+        <button class="hw-mode-btn" data-mode="low">LITE 480P</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="app">
+    <div id="channelScreen" style="display: flex; flex-direction: row; gap: 1rem; align-items: center; height: 100%; width: max-content; padding: 0 1.25rem; margin: 0 auto;">
+      <div class="header">
+        <input type="text" id="myIdInput" class="big-id-input" placeholder="INIT...">
+      </div>
+
+      <div class="status-bar" id="statusBar" title="Connection Status">
+        <div class="status-dot connected"></div>
+        <span id="statusText" style="display: none;">CONNECTING...</span>
+      </div>
+
+      <!-- Hardware Capacity & Auto Quality Indicator Button -->
+      <button id="hwHudBtn" class="hw-hud-btn" title="Click to view Device Core Details & Quality Settings">
+        <span id="hwHudSummary">HW: DETECTING...</span>
+        <span class="hw-tier-pill" id="hwHudTierPill">AUTO</span>
+      </button>
+
+      <!-- Controls Card -->
+      <div class="card">
+        <div class="waveform" id="waveform">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <button id="acceptCallBtn" class="btn">ACCEPT</button>
+        <button id="cutCallBtn" class="btn">MUTE</button>
+        <button id="buzzAllBtn" class="btn" title="GLOBAL BUZZ" style="padding: 0 1rem; display: none;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 17H2c0-1.5 1.5-2.5 1.5-2.5V10a8.5 8.5 0 0 1 17 0v4.5S22 15.5 22 17z"></path>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Network Presence Card -->
+      <div class="card">
+        <ul class="members-list" id="membersList"></ul>
+      </div>
+    </div>
+  </div>
 
   <div id="buzzToast" class="buzz-toast">
     <span id="buzzToastText">BUZZ</span>
@@ -264,7 +600,7 @@
       window.addEventListener('resize', resize); resize();
       const NODE_COUNT = Math.min(70, Math.floor((window.innerWidth * window.innerHeight) / 14000)), LINK_DIST = 140, nodes = [];
       for (let i = 0; i < NODE_COUNT; i++) nodes.push({ x: Math.random() * width, y: Math.random() * height, vx: (Math.random() - 0.5) * 0.25, vy: (Math.random() - 0.5) * 0.25, size: 2 + Math.random() * 2.5, alpha: 0.3 + Math.random() * 0.3 });
-      
+
       const colorAccent = [1.0, 1.0, 1.0], pointPosBuffer = gl.createBuffer(), pointSizeBuffer = gl.createBuffer(), pointAlphaBuffer = gl.createBuffer(), linePosBuffer = gl.createBuffer(), lineAlphaBuffer = gl.createBuffer();
       const pointAttribs = { aPosition: gl.getAttribLocation(pointProgram, 'aPosition'), aSize: gl.getAttribLocation(pointProgram, 'aSize'), aAlpha: gl.getAttribLocation(pointProgram, 'aAlpha') }, pointUniforms = { uResolution: gl.getUniformLocation(pointProgram, 'uResolution'), uColor: gl.getUniformLocation(pointProgram, 'uColor') }, lineAttribs = { aPosition: gl.getAttribLocation(lineProgram, 'aPosition'), aAlpha: gl.getAttribLocation(lineProgram, 'aAlpha') }, lineUniforms = { uResolution: gl.getUniformLocation(lineProgram, 'uResolution'), uColor: gl.getUniformLocation(lineProgram, 'uColor') };
       function update() { for (const n of nodes) { n.x += n.vx; n.y += n.vy; if (n.x < 0 || n.x > width) n.vx *= -1; if (n.y < 0 || n.y > height) n.vy *= -1; n.x = Math.max(0, Math.min(width, n.x)); n.y = Math.max(0, Math.min(height, n.y)); } }
@@ -294,7 +630,7 @@
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
 
-    const GLITCH_WORKER_URL = "https://ptt-backend-zi8u.onrender.com"; 
+    const GLITCH_WORKER_URL = "https://ptt-backend-zi8u.onrender.com";
     const VAPID_PUBLIC_KEY = "BCPTdBcEXkGuQTtLehEmXp7KkN5jqhAyp4VbL7GZn1ixXAyt_AOXq6qAzzSJO8BM47YnfdGmLc990m0P3ER_2RA";
 
     function urlBase64ToUint8Array(base64String) {
@@ -311,307 +647,436 @@
     }
 
     const servers = { iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] };
-    
-        // ---- Adaptive Quality: device capability detection ----
-        const QUALITY_PROFILES = {
-          low:    { width: 480,  height: 360, frameRate: 15, maxBitrate: 350000,  audioSampleRate: 24000 },
-          medium: { width: 960,  height: 540, frameRate: 20, maxBitrate: 1200000, audioSampleRate: 48000 },
-          high:   { width: 1280, height: 720, frameRate: 24, maxBitrate: 3000000, audioSampleRate: 48000 }
-        };
-        let currentTier = 'medium';
-        let currentProfile = QUALITY_PROFILES.medium;
-    
-        function measureScreenRefreshRate() {
-          return new Promise((resolve) => {
-            let frames = 0;
-            const start = performance.now();
-            function tick(now) {
-              frames++;
-              if (now - start < 400) {
-                requestAnimationFrame(tick);
-              } else {
-                resolve(Math.round((frames * 1000) / (now - start)));
-              }
-            }
+
+    // ---- Hardware-Aware Uncompromised Quality Engine ----
+    const QUALITY_PROFILES = window.__QUALITY_PROFILES;
+    let qualityMode = 'auto'; // 'auto' | 'ultra' | 'high' | 'medium' | 'low'
+    let currentTier = window.__earlyTier || 'ultra';
+    let currentProfile = QUALITY_PROFILES[currentTier] || QUALITY_PROFILES.ultra;
+    const hwInfo = window.__HW_INFO || {};
+
+    function measureScreenRefreshRate() {
+      return new Promise((resolve) => {
+        let frames = 0;
+        const start = performance.now();
+        function tick(now) {
+          frames++;
+          if (now - start < 500) {
             requestAnimationFrame(tick);
-          });
+          } else {
+            resolve(Math.round((frames * 1000) / (now - start)));
+          }
         }
-    
-        function detectDeviceTier() {
-                  const cores = navigator.hardwareConcurrency || 2;
-                  const memory = navigator.deviceMemory || 4; // undefined on iOS/Firefox, assume mid-range
-                  const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-                  const netType = conn ? conn.effectiveType : '4g';
-                  const saveData = conn ? !!conn.saveData : false;
-        
-                  let score = 0;
-                  if (cores >= 6) score += 2; else if (cores >= 4) score += 1;
-                  if (memory >= 6) score += 2; else if (memory >= 4) score += 1;
-                  if (netType === '4g') score += 1;
-                  if (saveData || netType === '2g' || netType === 'slow-2g') score -= 2;
-        
-                  let tier = 'medium';
-                  if (score <= 1) tier = 'low';
-                  else if (score >= 4) tier = 'high';
-        
-                  currentTier = tier;
-                  currentProfile = QUALITY_PROFILES[tier];
-                  return currentProfile;
-                }
-        
-                // Refine the tier in the background using the real screen refresh rate, without blocking
-                // camera acquisition. If the device turns out weaker than the instant guess assumed,
-                // tighten constraints on the track that is already streaming instead of waiting to start it.
-                async function refineDeviceTierInBackground() {
-                  const refreshRate = await measureScreenRefreshRate();
-                  if (refreshRate < 30 && currentTier !== 'low') {
-                    currentTier = 'low';
-                    currentProfile = QUALITY_PROFILES.low;
-                    const vTrack = localStream && localStream.getVideoTracks()[0];
-                    if (vTrack) {
-                      vTrack.applyConstraints({
-                        width: { ideal: currentProfile.width },
-                        height: { ideal: currentProfile.height },
-                        frameRate: { ideal: currentProfile.frameRate }
-                      }).catch(() => {});
-                    }
-                    Object.values(peers).forEach((p) => {
-                      p.getSenders().forEach((s) => { if (s.track && s.track.kind === 'video') applyBitrateToSender(s); });
-                    });
-                  }
-                }
-    
-        function applyDegradationPreference(pc) {
-          pc.getSenders().forEach((sender) => {
-            if (sender.track && sender.track.kind === 'video') {
-              try {
-                sender.setParameters(Object.assign({}, sender.getParameters(), {
-                  degradationPreference: currentTier === 'low' ? 'maintain-framerate' : 'balanced'
-                }));
-              } catch (e) {}
-            }
-          });
+        requestAnimationFrame(tick);
+      });
+    }
+
+    // Probe the active video track's native sensor limits & lock onto maximum sensor resolution on Ultra tier
+    async function maximizeSensorAndProbeCapabilities() {
+      if (!localStream) return;
+      const vTrack = localStream.getVideoTracks()[0];
+      if (!vTrack) return;
+
+      try {
+        if (typeof vTrack.getCapabilities === 'function') {
+          const caps = vTrack.getCapabilities();
+          const maxW = caps.width && caps.width.max ? caps.width.max : 1920;
+          const maxH = caps.height && caps.height.max ? caps.height.max : 1080;
+          const maxFps = caps.frameRate && caps.frameRate.max ? Math.min(60, Math.round(caps.frameRate.max)) : 60;
+          hwInfo.sensorMaxRes = `${maxW}×${maxH} @ ${maxFps}FPS`;
+
+          // If running on ULTRA MAX, request the camera's true ceiling without compromise
+          if (currentTier === 'ultra') {
+            await vTrack.applyConstraints({
+              width: { ideal: maxW },
+              height: { ideal: maxH },
+              frameRate: { ideal: maxFps }
+            }).catch(() => {});
+          }
+        } else {
+          hwInfo.sensorMaxRes = 'Native Auto';
         }
-    
-        function applyBitrateToSender(sender) {
+      } catch (e) {
+        hwInfo.sensorMaxRes = 'Standard UVC/Cam';
+      }
+
+      try {
+        if ('contentHint' in vTrack) {
+          vTrack.contentHint = currentProfile.contentHint || 'detail';
+        }
+      } catch (e) {}
+
+      refreshHardwareTelemetryUI();
+    }
+
+    function applySenderParameters(pc) {
+      pc.getSenders().forEach((sender) => {
+        if (!sender.track) return;
+        if (sender.track.kind === 'video') {
           try {
-            const params = sender.getParameters();
-            if (!params.encodings) params.encodings = [{}];
+            const params = sender.getParameters() || {};
+            if (!params.encodings || !params.encodings.length) params.encodings = [{}];
             params.encodings[0].maxBitrate = currentProfile.maxBitrate;
+            params.encodings[0].maxFramerate = currentProfile.frameRate;
+            params.encodings[0].scaleResolutionDownBy = 1.0;
+            params.degradationPreference = currentProfile.degradation || 'maintain-resolution';
+            sender.setParameters(params).catch(() => {});
+          } catch (e) {}
+        } else if (sender.track.kind === 'audio') {
+          try {
+            const params = sender.getParameters() || {};
+            if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+            params.encodings[0].maxBitrate = currentProfile.audioBitrate || 128000;
             sender.setParameters(params).catch(() => {});
           } catch (e) {}
         }
-    
-        // Live re-adaptation: watch actual outbound video fps and downgrade further if the device can't keep up
-        function startAdaptiveMonitor() {
-          setInterval(async () => {
-            for (const uid in peers) {
-              const pc = peers[uid];
-              if (!pc || pc.connectionState !== 'connected') continue;
-              try {
-                const stats = await pc.getStats();
-                stats.forEach((report) => {
-                  if (report.type === 'outbound-rtp' && report.kind === 'video' && report.framesPerSecond) {
-                    if (report.framesPerSecond < currentProfile.frameRate * 0.6 && currentTier !== 'low') {
-                      currentTier = currentTier === 'high' ? 'medium' : 'low';
-                      currentProfile = QUALITY_PROFILES[currentTier];
-                      const vTrack = localStream && localStream.getVideoTracks()[0];
-                      if (vTrack) {
-                        vTrack.applyConstraints({
-                          width: { ideal: currentProfile.width },
-                          height: { ideal: currentProfile.height },
-                          frameRate: { ideal: currentProfile.frameRate }
-                        }).catch(() => {});
-                      }
-                      Object.values(peers).forEach((p) => {
-                        p.getSenders().forEach((s) => { if (s.track && s.track.kind === 'video') applyBitrateToSender(s); });
-                      });
-                    }
-                  }
-                });
-              } catch (e) {}
-            }
-          }, 8000);
+      });
+    }
+
+    async function applyTierProfile(newTier, modeLabel = qualityMode) {
+      qualityMode = modeLabel;
+      currentTier = newTier;
+      currentProfile = QUALITY_PROFILES[currentTier] || QUALITY_PROFILES.ultra;
+
+      const vTrack = localStream && localStream.getVideoTracks()[0];
+      if (vTrack) {
+        let targetW = currentProfile.width;
+        let targetH = currentProfile.height;
+        let targetFps = currentProfile.frameRate;
+
+        if (currentTier === 'ultra' && typeof vTrack.getCapabilities === 'function') {
+          try {
+            const caps = vTrack.getCapabilities();
+            if (caps.width && caps.width.max) targetW = caps.width.max;
+            if (caps.height && caps.height.max) targetH = caps.height.max;
+            if (caps.frameRate && caps.frameRate.max) targetFps = Math.min(60, Math.round(caps.frameRate.max));
+          } catch (e) {}
         }
+
+        await vTrack.applyConstraints({
+          width: { ideal: targetW },
+          height: { ideal: targetH },
+          frameRate: { ideal: targetFps }
+        }).catch(() => {});
+
+        try {
+          if ('contentHint' in vTrack) vTrack.contentHint = currentProfile.contentHint || 'detail';
+        } catch (e) {}
+      }
+
+      Object.values(peers).forEach((pc) => applySenderParameters(pc));
+      setTimeout(refreshHardwareTelemetryUI, 350);
+    }
+
+    function refreshHardwareTelemetryUI() {
+      const vTrack = localStream && localStream.getVideoTracks()[0];
+      const settings = vTrack && typeof vTrack.getSettings === 'function' ? vTrack.getSettings() : {};
+      const actualW = localVideo.videoWidth || settings.width || currentProfile.width;
+      const actualH = localVideo.videoHeight || settings.height || currentProfile.height;
+      const actualFps = settings.frameRate ? Math.round(settings.frameRate) : currentProfile.frameRate;
+
+      hwInfo.activeRes = `${actualW}×${actualH}`;
+      hwInfo.activeFps = actualFps;
+
+      // Update SELF video overlay tag
+      const localResTag = document.getElementById('localResTag');
+      if (localResTag) {
+        const modePrefix = qualityMode === 'auto' ? 'AUTO' : 'LOCK';
+        localResTag.textContent = `${modePrefix}:${currentProfile.label} • ${actualW}×${actualH}@${actualFps}FPS • ${hwInfo.cores}C`;
+      }
+
+      // Update Bottom Bar HUD chip
+      const hwHudSummary = document.getElementById('hwHudSummary');
+      const hwHudTierPill = document.getElementById('hwHudTierPill');
+      if (hwHudSummary && hwHudTierPill) {
+        const shortClass = hwInfo.score >= 76 ? 'FAST CPU' : (hwInfo.score >= 58 ? 'HIGH CPU' : (hwInfo.score >= 40 ? 'MID CPU' : 'LITE CPU'));
+        hwHudSummary.textContent = `${shortClass} (${hwInfo.cores}C/${hwInfo.memory.replace(' (Est)', '')})`;
+        hwHudTierPill.textContent = `${qualityMode === 'auto' ? 'AUTO' : 'MAN'}: ${currentProfile.label}`;
+      }
+
+      // Update Modal fields
+      const verdictEl = document.getElementById('hwProcessorVerdict');
+      if (verdictEl) {
+        verdictEl.textContent = `${hwInfo.processorClass} (SCORE ${hwInfo.score}/100) → ${currentProfile.label}`;
+      }
+      const cpuEl = document.getElementById('hwCpuVal');
+      if (cpuEl) cpuEl.textContent = `${hwInfo.cores} Cores • ${(hwInfo.cpuOpsPerMs / 1000).toFixed(1)}K ops/ms`;
+
+      const ramEl = document.getElementById('hwRamVal');
+      if (ramEl) ramEl.textContent = hwInfo.memory;
+
+      const gpuEl = document.getElementById('hwGpuVal');
+      if (gpuEl) gpuEl.textContent = `${hwInfo.gpuClass} (${hwInfo.gpuRenderer})`;
+
+      const hzEl = document.getElementById('hwHzVal');
+      if (hzEl) hzEl.textContent = `${hwInfo.refreshRateHz} Hz • DPR ${hwInfo.dpr}x`;
+
+      const netEl = document.getElementById('hwNetVal');
+      if (netEl) netEl.textContent = `${hwInfo.netType} • ~${hwInfo.downlinkMbps} Mbps (${hwInfo.rttMs}ms)`;
+
+      const sensorEl = document.getElementById('hwSensorMaxVal');
+      if (sensorEl) sensorEl.textContent = hwInfo.sensorMaxRes || 'Probing...';
+
+      const activeStreamEl = document.getElementById('hwActiveStreamVal');
+      if (activeStreamEl) {
+        const mbps = (currentProfile.maxBitrate / 1000000).toFixed(1);
+        activeStreamEl.textContent = `${actualW}×${actualH} @ ${actualFps} FPS (Max ${mbps} Mbps)`;
+      }
+
+      // Sync mode buttons
+      document.querySelectorAll('#hwModeBar .hw-mode-btn').forEach((btn) => {
+        const m = btn.getAttribute('data-mode');
+        btn.classList.toggle('active', m === qualityMode);
+      });
+    }
+
+    // Smart Auto-Adaptation Monitor: only steps down if WebRTC explicitly reports CPU limitation
+    let cpuOverloadStrikes = 0;
+    function startAdaptiveMonitor() {
+      setInterval(async () => {
+        refreshHardwareTelemetryUI();
+        if (qualityMode !== 'auto') return;
+
+        let cpuLimited = false;
+        for (const uid in peers) {
+          const pc = peers[uid];
+          if (!pc || pc.connectionState !== 'connected') continue;
+          try {
+            const stats = await pc.getStats();
+            stats.forEach((report) => {
+              if (report.type === 'outbound-rtp' && report.kind === 'video') {
+                if (report.qualityLimitationReason === 'cpu') {
+                  cpuLimited = true;
+                }
+              }
+            });
+          } catch (e) {}
+        }
+
+        if (cpuLimited) {
+          cpuOverloadStrikes++;
+          if (cpuOverloadStrikes >= 2 && currentTier !== 'low') {
+            cpuOverloadStrikes = 0;
+            const order = ['ultra', 'high', 'medium', 'low'];
+            const nextIdx = Math.min(order.length - 1, order.indexOf(currentTier) + 1);
+            await applyTierProfile(order[nextIdx], 'auto');
+          }
+        } else {
+          cpuOverloadStrikes = 0;
+        }
+      }, 6000);
+    }
+
+    // Wire up Hardware Modal UI
+    const hwHudBtn = document.getElementById('hwHudBtn');
+    const hwModalBackdrop = document.getElementById('hwModalBackdrop');
+    const hwModalCloseBtn = document.getElementById('hwModalCloseBtn');
+
+    hwHudBtn.addEventListener('click', () => {
+      refreshHardwareTelemetryUI();
+      hwModalBackdrop.classList.add('open');
+    });
+    hwModalCloseBtn.addEventListener('click', () => {
+      hwModalBackdrop.classList.remove('open');
+    });
+    hwModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === hwModalBackdrop) hwModalBackdrop.classList.remove('open');
+    });
+
+    document.querySelectorAll('#hwModeBar .hw-mode-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const mode = btn.getAttribute('data-mode');
+        if (mode === 'auto') {
+          await applyTierProfile(hwInfo.autoRecommendedTier || 'ultra', 'auto');
+        } else {
+          await applyTierProfile(mode, mode);
+        }
+      });
+    });
 
     const myUid = localStorage.getItem('myUid') || Math.random().toString(36).substring(2, 10);
     localStorage.setItem('myUid', myUid);
     let myName = localStorage.getItem('myName') || "";
 
     let localStream = null;
-        let keepAliveAudio = null;
-        const peers = {};
-        const candidateQueues = {};
-        const agentPresenceStates = {};
-        const reconnectAttempts = {};
-        const reconnectTimers = {};
-        const onlineUids = new Set();
-        const RECONNECT_BASE_MS = 1000;
-        const RECONNECT_MAX_MS = 30000;
-        const DISCONNECT_GRACE_MS = 5000;
-    
-        function cleanupPeer(uid) {
-          const wrapper = document.getElementById('video-wrapper-' + uid);
-          if (wrapper) {
-            wrapper.remove();
-            updateVideoGrid();
-          }
-          if (peers[uid]) {
-            if (peers[uid].connectionState !== 'closed') peers[uid].close();
-            delete peers[uid];
-          }
-        }
-    
-        function scheduleReconnect(targetUid) {
-          if (!onlineUids.has(targetUid)) return; // peer isn't present anymore - presence listener will handle it
-          if (reconnectTimers[targetUid]) return; // already scheduled
-          const attempt = (reconnectAttempts[targetUid] || 0) + 1;
-          reconnectAttempts[targetUid] = attempt;
-          const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt - 1), RECONNECT_MAX_MS);
-          reconnectTimers[targetUid] = setTimeout(() => {
-            delete reconnectTimers[targetUid];
-            if (myUid > targetUid && onlineUids.has(targetUid) && (!peers[targetUid] || peers[targetUid].connectionState === 'closed')) {
-              initiateCall(targetUid);
-            }
-          }, delay);
-        }
+    let keepAliveAudio = null;
+    const peers = {};
+    const candidateQueues = {};
+    const agentPresenceStates = {};
+    const reconnectAttempts = {};
+    const reconnectTimers = {};
+    const onlineUids = new Set();
+    const RECONNECT_BASE_MS = 1000;
+    const RECONNECT_MAX_MS = 30000;
+    const DISCONNECT_GRACE_MS = 5000;
 
-    let isCommsLive = false; 
-        let hasJoined = false;
-        let hasMedia = false;
-        let ringingInterval = null; 
-        let videoDevices = [];
-            let currentDeviceIndex = 0;
-            let lastTapTime = 0;
-        
-            async function getVideoDevices() {
-              try {
-                const devices = await navigator.mediaDevices.enumerateDevices();
-                videoDevices = devices.filter(function (d) { return d.kind === 'videoinput'; });
-              } catch (e) {
-                videoDevices = [];
-              }
-              return videoDevices;
-            } 
-    
+    function cleanupPeer(uid) {
+      const wrapper = document.getElementById('video-wrapper-' + uid);
+      if (wrapper) {
+        wrapper.remove();
+        updateVideoGrid();
+      }
+      if (peers[uid]) {
+        if (peers[uid].connectionState !== 'closed') peers[uid].close();
+        delete peers[uid];
+      }
+    }
+
+    function scheduleReconnect(targetUid) {
+      if (!onlineUids.has(targetUid)) return;
+      if (reconnectTimers[targetUid]) return;
+      const attempt = (reconnectAttempts[targetUid] || 0) + 1;
+      reconnectAttempts[targetUid] = attempt;
+      const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt - 1), RECONNECT_MAX_MS);
+      reconnectTimers[targetUid] = setTimeout(() => {
+        delete reconnectTimers[targetUid];
+        if (myUid > targetUid && onlineUids.has(targetUid) && (!peers[targetUid] || peers[targetUid].connectionState === 'closed')) {
+          initiateCall(targetUid);
+        }
+      }, delay);
+    }
+
+    let isCommsLive = false;
+    let hasJoined = false;
+    let hasMedia = false;
+    let ringingInterval = null;
+    let videoDevices = [];
+    let currentDeviceIndex = 0;
+    let lastTapTime = 0;
+
+    async function getVideoDevices() {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        videoDevices = devices.filter(function (d) { return d.kind === 'videoinput'; });
+      } catch (e) {
+        videoDevices = [];
+      }
+      return videoDevices;
+    }
+
     const waveform = document.getElementById('waveform');
     const acceptCallBtn = document.getElementById('acceptCallBtn');
     const cutCallBtn = document.getElementById('cutCallBtn');
     const statusText = document.getElementById('statusText');
     const myIdInput = document.getElementById('myIdInput');
     const videoCard = document.getElementById('videoCard');
-        const localVideo = document.getElementById('localVideo');
-    
-        // Dynamic Video Grid Calculator (Horizontal Split)
-                function updateVideoGrid() {
-                  const wrappers = document.querySelectorAll('.video-wrapper');
-                  const count = wrappers.length;
-                  if (count === 0) return;
-                  
-                  // Prioritize rows over columns to stack videos top-to-bottom
-                  const rows = Math.ceil(Math.sqrt(count));
-                  const cols = Math.ceil(count / rows);
-                  
-                  wrappers.forEach(w => {
-                    w.style.width = `${100 / cols}%`;
-                    w.style.height = `${100 / rows}%`;
-                  });
-                }
-        window.addEventListener('resize', updateVideoGrid);
-        
-            async function switchCamera() {
-                              if (!localStream) return;
-                              await getVideoDevices();
-                              if (videoDevices.length < 2) return; // Only one camera on this device - nothing to switch to
-            
-                              const oldVideoTrack = localStream.getVideoTracks()[0];
-                              const oldSettings = oldVideoTrack ? oldVideoTrack.getSettings() : {};
-                              let idx = videoDevices.findIndex(function (d) { return d.deviceId === oldSettings.deviceId; });
-                              if (idx === -1) idx = currentDeviceIndex;
-                              currentDeviceIndex = (idx + 1) % videoDevices.length;
-                              const nextDeviceId = videoDevices[currentDeviceIndex].deviceId;
-            
-                              const buildConstraints = function (deviceId) {
-                                return {
-                                  video: {
-                                    deviceId: { exact: deviceId },
-                                    width: { ideal: currentProfile.width },
-                                    height: { ideal: currentProfile.height },
-                                    frameRate: { ideal: currentProfile.frameRate, max: currentProfile.frameRate }
-                                  },
-                                  audio: false
-                                };
-                              };
-            
-                              let newStream;
-                              try {
-                                newStream = await navigator.mediaDevices.getUserMedia(buildConstraints(nextDeviceId));
-                              } catch (firstErr) {
-                                if (oldVideoTrack) {
-                                  localStream.removeTrack(oldVideoTrack);
-                                  oldVideoTrack.stop();
-                                }
-                                try {
-                                  newStream = await navigator.mediaDevices.getUserMedia(buildConstraints(nextDeviceId));
-                                } catch (secondErr) {
-                                  alert("CAMERA SWITCH FAILED.");
-                                  return;
-                                }
-                              }
-            
-                              const newVideoTrack = newStream.getVideoTracks()[0];
-                              if (!newVideoTrack) return;
-            
-                              Object.values(peers).forEach(function (pc) {
-                                const sender = pc.getSenders().find(function (s) { return s.track && s.track.kind === 'video'; });
-                                if (sender) sender.replaceTrack(newVideoTrack).catch(function () {});
-                              });
-            
-                              if (oldVideoTrack && localStream.getVideoTracks().indexOf(oldVideoTrack) !== -1) {
-                                localStream.removeTrack(oldVideoTrack);
-                                oldVideoTrack.stop();
-                              }
-                              localStream.addTrack(newVideoTrack);
-                              newVideoTrack.enabled = isCommsLive;
-                              localVideo.srcObject = localStream;
-            
-                              const newSettings = newVideoTrack.getSettings();
-                              if (newSettings.facingMode) {
-                                localVideo.classList.toggle('mirrored', newSettings.facingMode === 'user');
-                              } else {
-                                localVideo.classList.toggle('mirrored', currentDeviceIndex === 0);
-                              }
-                            }
-        
-            (function setupDoubleTapCameraSwitch() {
-                      const wrapperEl = document.getElementById('localVideoWrapper');
-                      if (!wrapperEl) return;
-                      let lastSwitchTime = 0;
-                      const SWITCH_GUARD_MS = 500; // prevents touchend + native dblclick both firing for one gesture
-            
-                      function triggerSwitch() {
-                        const now = Date.now();
-                        if (now - lastSwitchTime < SWITCH_GUARD_MS) return; // already handled by the other event type
-                        lastSwitchTime = now;
-                        switchCamera();
-                      }
-            
-                      wrapperEl.addEventListener('touchend', function (e) {
-                        const now = Date.now();
-                        if (now - lastTapTime < 300) {
-                          e.preventDefault();
-                          triggerSwitch();
-                          lastTapTime = 0;
-                        } else {
-                          lastTapTime = now;
-                        }
-                      });
-                      wrapperEl.addEventListener('dblclick', function () {
-                        triggerSwitch();
-                      });
-                    })();
-    
-        // Handle manual edits to the assigned ID
+    const localVideo = document.getElementById('localVideo');
+
+    localVideo.addEventListener('loadedmetadata', () => {
+      refreshHardwareTelemetryUI();
+    });
+
+    function updateVideoGrid() {
+      const wrappers = document.querySelectorAll('.video-wrapper');
+      const count = wrappers.length;
+      if (count === 0) return;
+
+      const rows = Math.ceil(Math.sqrt(count));
+      const cols = Math.ceil(count / rows);
+
+      wrappers.forEach(w => {
+        w.style.width = `${100 / cols}%`;
+        w.style.height = `${100 / rows}%`;
+      });
+    }
+    window.addEventListener('resize', updateVideoGrid);
+
+    async function switchCamera() {
+      if (!localStream) return;
+      await getVideoDevices();
+      if (videoDevices.length < 2) return;
+
+      const oldVideoTrack = localStream.getVideoTracks()[0];
+      const oldSettings = oldVideoTrack ? oldVideoTrack.getSettings() : {};
+      let idx = videoDevices.findIndex(function (d) { return d.deviceId === oldSettings.deviceId; });
+      if (idx === -1) idx = currentDeviceIndex;
+      currentDeviceIndex = (idx + 1) % videoDevices.length;
+      const nextDeviceId = videoDevices[currentDeviceIndex].deviceId;
+
+      const buildConstraints = function (deviceId) {
+        return {
+          video: {
+            deviceId: { exact: deviceId },
+            width: { ideal: currentProfile.width },
+            height: { ideal: currentProfile.height },
+            frameRate: { ideal: currentProfile.frameRate }
+          },
+          audio: false
+        };
+      };
+
+      let newStream;
+      try {
+        newStream = await navigator.mediaDevices.getUserMedia(buildConstraints(nextDeviceId));
+      } catch (firstErr) {
+        if (oldVideoTrack) {
+          localStream.removeTrack(oldVideoTrack);
+          oldVideoTrack.stop();
+        }
+        try {
+          newStream = await navigator.mediaDevices.getUserMedia(buildConstraints(nextDeviceId));
+        } catch (secondErr) {
+          alert("CAMERA SWITCH FAILED.");
+          return;
+        }
+      }
+
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      if (!newVideoTrack) return;
+
+      Object.values(peers).forEach(function (pc) {
+        const sender = pc.getSenders().find(function (s) { return s.track && s.track.kind === 'video'; });
+        if (sender) {
+          sender.replaceTrack(newVideoTrack).then(() => applySenderParameters(pc)).catch(function () {});
+        }
+      });
+
+      if (oldVideoTrack && localStream.getVideoTracks().indexOf(oldVideoTrack) !== -1) {
+        localStream.removeTrack(oldVideoTrack);
+        oldVideoTrack.stop();
+      }
+      localStream.addTrack(newVideoTrack);
+      newVideoTrack.enabled = isCommsLive;
+      localVideo.srcObject = localStream;
+
+      const newSettings = newVideoTrack.getSettings();
+      if (newSettings.facingMode) {
+        localVideo.classList.toggle('mirrored', newSettings.facingMode === 'user');
+      } else {
+        localVideo.classList.toggle('mirrored', currentDeviceIndex === 0);
+      }
+
+      await maximizeSensorAndProbeCapabilities();
+    }
+
+    (function setupDoubleTapCameraSwitch() {
+      const wrapperEl = document.getElementById('localVideoWrapper');
+      if (!wrapperEl) return;
+      let lastSwitchTime = 0;
+      const SWITCH_GUARD_MS = 500;
+
+      function triggerSwitch() {
+        const now = Date.now();
+        if (now - lastSwitchTime < SWITCH_GUARD_MS) return;
+        lastSwitchTime = now;
+        switchCamera();
+      }
+
+      wrapperEl.addEventListener('touchend', function (e) {
+        const now = Date.now();
+        if (now - lastTapTime < 300) {
+          e.preventDefault();
+          triggerSwitch();
+          lastTapTime = 0;
+        } else {
+          lastTapTime = now;
+        }
+      });
+      wrapperEl.addEventListener('dblclick', function () {
+        triggerSwitch();
+      });
+    })();
+
     myIdInput.addEventListener('change', (e) => {
       const newName = e.target.value.trim();
       if (newName) {
@@ -621,7 +1086,7 @@
           setDoc(doc(db, 'family_presence', myUid), { name: myName }, { merge: true });
         }
       } else {
-        e.target.value = myName; 
+        e.target.value = myName;
       }
     });
 
@@ -634,32 +1099,45 @@
     }
 
     async function attemptMediaRecovery() {
-       if (!hasMedia) {
+      if (!hasMedia) {
         try {
-          // Attempt Video + Audio first
-                    localStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: currentProfile.width }, height: { ideal: currentProfile.height }, frameRate: { ideal: currentProfile.frameRate, max: currentProfile.frameRate } }, audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate } });
-                              localVideo.srcObject = localStream;
-                              hasMedia = true;
-                            } catch (e) {
-                              try {
-                                // Fallback to Audio only if camera denied or absent
-                                            localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate } });
-                                hasMedia = true;
-                              } catch(err) {
-                                alert("A/V DENIED BY OS SETTINGS.");
-                                return;
-                              }
-                            }
-                            
-                            Object.values(peers).forEach(pc => {
-                                      localStream.getTracks().forEach(track => {
-                                        const sender = pc.addTrack(track, localStream);
-                                        if (track.kind === 'video') {
-                                          applyBitrateToSender(sender);
-                                        }
-                                      });
-                                      applyDegradationPreference(pc);
-                                    });
+          localStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: 'user' },
+              width: { ideal: currentProfile.width },
+              height: { ideal: currentProfile.height },
+              frameRate: { ideal: currentProfile.frameRate }
+            },
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              sampleRate: currentProfile.audioSampleRate,
+              channelCount: { ideal: 2 }
+            }
+          });
+          localVideo.srcObject = localStream;
+          hasMedia = true;
+          await maximizeSensorAndProbeCapabilities();
+        } catch (e) {
+          try {
+            localStream = await navigator.mediaDevices.getUserMedia({
+              video: false,
+              audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate }
+            });
+            hasMedia = true;
+          } catch (err) {
+            alert("A/V DENIED BY OS SETTINGS.");
+            return;
+          }
+        }
+
+        Object.values(peers).forEach(pc => {
+          localStream.getTracks().forEach(track => {
+            pc.addTrack(track, localStream);
+          });
+          applySenderParameters(pc);
+        });
       }
     }
 
@@ -667,16 +1145,16 @@
       if (localStream) {
         localStream.getTracks().forEach(t => t.enabled = isCommsLive);
       }
-      
+
       const remoteVideos = document.querySelectorAll('#videoGrid video:not(#localVideo)');
-            remoteVideos.forEach(v => {
-              if (isCommsLive) {
-                v.muted = true;
-                v.play().then(() => { v.muted = false; }).catch(() => {});
-              } else {
-                v.muted = true;
-              }
-            });
+      remoteVideos.forEach(v => {
+        if (isCommsLive) {
+          v.muted = true;
+          v.play().then(() => { v.muted = false; }).catch(() => {});
+        } else {
+          v.muted = true;
+        }
+      });
 
       if (isCommsLive) {
         waveform.classList.add('active');
@@ -685,7 +1163,7 @@
         document.querySelector('.status-dot').classList.add('speaking');
       } else {
         waveform.classList.remove('active');
-        videoCard.style.display = 'none'; // Hide feeds to save space when cut
+        videoCard.style.display = 'none';
         statusText.textContent = "STANDBY - MUTED";
         document.querySelector('.status-dot').classList.remove('speaking');
       }
@@ -695,7 +1173,10 @@
       }
 
       if (hasJoined) {
-        setDoc(doc(db, 'family_presence', myUid), { speaking: isCommsLive }, { merge: true }).catch(() => {});
+        setDoc(doc(db, 'family_presence', myUid), {
+          speaking: isCommsLive,
+          tier: currentProfile.label
+        }, { merge: true }).catch(() => {});
       }
     }
 
@@ -707,31 +1188,29 @@
       acceptCallBtn.style.display = 'none';
 
       if (isLocalAction) {
-        addDoc(collection(db, 'family_signals'), { 
-          sender: myUid, 
-          receiver: 'all', 
-          type: 'cut', 
-          timestamp: Date.now() 
-        }).catch(()=>{});
+        addDoc(collection(db, 'family_signals'), {
+          sender: myUid,
+          receiver: 'all',
+          type: 'cut',
+          timestamp: Date.now()
+        }).catch(() => {});
       }
     }
 
-    // Accepting the Call
     acceptCallBtn.onclick = async () => {
       stopRinging();
-      try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch(e){}
+      try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch (e) {}
       await attemptMediaRecovery();
-      if(!hasMedia) return;
+      if (!hasMedia) return;
       isCommsLive = true;
       updateMediaState();
-      
+
       acceptCallBtn.style.display = 'none';
       cutCallBtn.style.display = 'block';
     };
 
-    // Cutting the Call
     cutCallBtn.onclick = () => {
-      endCall(true); 
+      endCall(true);
     };
 
     const buzzCooldowns = {};
@@ -789,22 +1268,22 @@
       toastText.textContent = text;
       toast.classList.add('show');
     }
-    
+
     function hideBuzzToast() {
       document.getElementById('buzzToast').classList.remove('show');
     }
 
     function startRinging(fromName) {
-      if (ringingInterval) return; 
-      
+      if (ringingInterval) return;
+
       if (isCommsLive) {
-         isCommsLive = false;
-         updateMediaState();
+        isCommsLive = false;
+        updateMediaState();
       }
 
       showBuzzToast('INCOMING PING: ' + fromName);
       document.body.classList.add('incoming-buzz');
-      
+
       acceptCallBtn.style.display = 'block';
       cutCallBtn.style.display = 'none';
 
@@ -812,7 +1291,7 @@
         playBuzzTone();
         if (navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 400]);
       };
-      
+
       triggerRing();
       ringingInterval = setInterval(triggerRing, 3000);
     }
@@ -828,44 +1307,44 @@
     }
 
     async function sendBuzz(targetUid, btnEl) {
-          try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch(e){}
-          
-          const now = Date.now();
-                if (buzzCooldowns[targetUid] && now < buzzCooldowns[targetUid]) return;
-                buzzCooldowns[targetUid] = now + BUZZ_COOLDOWN_MS;
-                
-                const originalText = btnEl ? btnEl.textContent : null;
-                if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'TX..'; }
-                
-                if (!isCommsLive) {
-            await attemptMediaRecovery();
-            if (hasMedia) {
-               isCommsLive = true;
-               updateMediaState();
-               cutCallBtn.style.display = 'block';
-               acceptCallBtn.style.display = 'none';
-               stopRinging();
-            }
-          }
-          
-          try {
-            await addDoc(collection(db, 'family_buzz'), { sender: myUid, senderName: myName, receiver: targetUid, timestamp: now });
-          } catch (e) {}
-          
-          relayPushBuzz(targetUid);
-          
-          if (btnEl) {
-            setTimeout(() => { btnEl.disabled = false; btnEl.textContent = originalText; }, BUZZ_COOLDOWN_MS);
-          }
+      try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch (e) {}
+
+      const now = Date.now();
+      if (buzzCooldowns[targetUid] && now < buzzCooldowns[targetUid]) return;
+      buzzCooldowns[targetUid] = now + BUZZ_COOLDOWN_MS;
+
+      const originalText = btnEl ? btnEl.textContent : null;
+      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'TX..'; }
+
+      if (!isCommsLive) {
+        await attemptMediaRecovery();
+        if (hasMedia) {
+          isCommsLive = true;
+          updateMediaState();
+          cutCallBtn.style.display = 'block';
+          acceptCallBtn.style.display = 'none';
+          stopRinging();
         }
+      }
+
+      try {
+        await addDoc(collection(db, 'family_buzz'), { sender: myUid, senderName: myName, receiver: targetUid, timestamp: now });
+      } catch (e) {}
+
+      relayPushBuzz(targetUid);
+
+      if (btnEl) {
+        setTimeout(() => { btnEl.disabled = false; btnEl.textContent = originalText; }, BUZZ_COOLDOWN_MS);
+      }
+    }
 
     function listenForBuzzes() {
       const qMine = query(collection(db, 'family_buzz'), where('receiver', '==', myUid));
       onSnapshot(qMine, (snapshot) => {
-        snapshot.docChanges().forEach((change) => { 
+        snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
             if (change.doc.data().sender !== myUid) {
-               startRinging(change.doc.data().senderName || 'AGENT');
+              startRinging(change.doc.data().senderName || 'AGENT');
             }
             deleteDoc(doc(db, 'family_buzz', change.doc.id)).catch(() => {});
           }
@@ -874,13 +1353,13 @@
 
       const qAll = query(collection(db, 'family_buzz'), where('receiver', '==', 'all'));
       onSnapshot(qAll, (snapshot) => {
-        snapshot.docChanges().forEach((change) => { 
+        snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
-             if (change.doc.data().sender !== myUid) {
-                startRinging(change.doc.data().senderName || 'AGENT');
-             }
-             deleteDoc(doc(db, 'family_buzz', change.doc.id)).catch(() => {});
-          } 
+            if (change.doc.data().sender !== myUid) {
+              startRinging(change.doc.data().senderName || 'AGENT');
+            }
+            deleteDoc(doc(db, 'family_buzz', change.doc.id)).catch(() => {});
+          }
         });
       });
     }
@@ -893,51 +1372,50 @@
       candidateQueues[targetUid] = [];
 
       if (localStream) {
-                    localStream.getTracks().forEach(track => {
-                      const sender = pc.addTrack(track, localStream);
-                      if (track.kind === 'video') {
-                        applyBitrateToSender(sender);
-                      }
-                    });
-                    applyDegradationPreference(pc);
-                  }
+        localStream.getTracks().forEach(track => {
+          pc.addTrack(track, localStream);
+        });
+        applySenderParameters(pc);
+      }
 
       pc.ontrack = (event) => {
-              // Create remote video wrapper if it doesn't exist
-              let wrapper = document.getElementById('video-wrapper-' + targetUid);
-              if (!wrapper) {
-                wrapper = document.createElement('div');
-                wrapper.className = 'video-wrapper active';
-                wrapper.id = 'video-wrapper-' + targetUid;
-                
-                const vid = document.createElement('video');
-                vid.id = 'video-' + targetUid;
-                vid.autoplay = true;
-                vid.playsInline = true;
-                vid.muted = true;
-                
-                const label = document.createElement('div');
-                label.className = 'video-label';
-                label.textContent = 'NODE ' + targetUid;
-                
-                wrapper.appendChild(vid);
-                          wrapper.appendChild(label);
-                          document.getElementById('videoGrid').appendChild(wrapper);
-                          updateVideoGrid();
-                        }
-                        
-                        const videoEl = document.getElementById('video-' + targetUid);
-              videoEl.srcObject = event.streams[0];
-              // Start muted so autoplay is never blocked (works on Safari/iOS/Chrome alike),
-              // then unmute right after playback actually starts so speaker audio works on every device.
-              videoEl.muted = true;
-              videoEl.play().then(() => {
-                videoEl.muted = !isCommsLive;
-              }).catch(() => {
-                // Still blocked - updateMediaState() will retry the mute/play state on the next
-                // user action (Accept/Mute tap).
-              });
-            };
+        let wrapper = document.getElementById('video-wrapper-' + targetUid);
+        if (!wrapper) {
+          wrapper = document.createElement('div');
+          wrapper.className = 'video-wrapper active';
+          wrapper.id = 'video-wrapper-' + targetUid;
+
+          const vid = document.createElement('video');
+          vid.id = 'video-' + targetUid;
+          vid.autoplay = true;
+          vid.playsInline = true;
+          vid.muted = true;
+
+          const label = document.createElement('div');
+          label.className = 'video-label';
+          label.id = 'video-label-' + targetUid;
+          label.innerHTML = `<span>NODE ${targetUid}</span><span class="res-tag" id="remote-res-${targetUid}">LIVE</span>`;
+
+          vid.addEventListener('loadedmetadata', () => {
+            const rTag = document.getElementById('remote-res-' + targetUid);
+            if (rTag && vid.videoWidth) {
+              rTag.textContent = `${vid.videoWidth}×${vid.videoHeight}`;
+            }
+          });
+
+          wrapper.appendChild(vid);
+          wrapper.appendChild(label);
+          document.getElementById('videoGrid').appendChild(wrapper);
+          updateVideoGrid();
+        }
+
+        const videoEl = document.getElementById('video-' + targetUid);
+        videoEl.srcObject = event.streams[0];
+        videoEl.muted = true;
+        videoEl.play().then(() => {
+          videoEl.muted = !isCommsLive;
+        }).catch(() => {});
+      };
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
@@ -946,26 +1424,26 @@
       };
 
       pc.onconnectionstatechange = () => {
-              const state = pc.connectionState;
-              if (state === 'connected') {
-                reconnectAttempts[targetUid] = 0;
-                if (reconnectTimers[targetUid]) {
-                  clearTimeout(reconnectTimers[targetUid]);
-                  delete reconnectTimers[targetUid];
-                }
-              } else if (state === 'disconnected') {
-                // 'disconnected' is often transient and self-recovers - give ICE a grace period before tearing down
-                setTimeout(() => {
-                  if (peers[targetUid] === pc && pc.connectionState !== 'connected') {
-                    cleanupPeer(targetUid);
-                    scheduleReconnect(targetUid);
-                  }
-                }, DISCONNECT_GRACE_MS);
-              } else if (state === 'failed' || state === 'closed') {
-                cleanupPeer(targetUid);
-                scheduleReconnect(targetUid);
-              }
-            };
+        const state = pc.connectionState;
+        if (state === 'connected') {
+          reconnectAttempts[targetUid] = 0;
+          applySenderParameters(pc);
+          if (reconnectTimers[targetUid]) {
+            clearTimeout(reconnectTimers[targetUid]);
+            delete reconnectTimers[targetUid];
+          }
+        } else if (state === 'disconnected') {
+          setTimeout(() => {
+            if (peers[targetUid] === pc && pc.connectionState !== 'connected') {
+              cleanupPeer(targetUid);
+              scheduleReconnect(targetUid);
+            }
+          }, DISCONNECT_GRACE_MS);
+        } else if (state === 'failed' || state === 'closed') {
+          cleanupPeer(targetUid);
+          scheduleReconnect(targetUid);
+        }
+      };
 
       peers[targetUid] = pc;
       return pc;
@@ -982,11 +1460,11 @@
       if (change.type === 'added') {
         const data = change.doc.data();
         const sender = data.sender;
-        
+
         if (sender === myUid) return;
 
         if (data.type === 'cut') {
-          endCall(false); 
+          endCall(false);
           deleteDoc(doc(db, 'family_signals', change.doc.id)).catch(() => {});
           return;
         }
@@ -1027,7 +1505,7 @@
       onSnapshot(qDirect, (snapshot) => {
         snapshot.docChanges().forEach(processSignal);
       });
-      
+
       const qGlobal = query(collection(db, 'family_signals'), where('receiver', '==', 'all'));
       onSnapshot(qGlobal, (snapshot) => {
         snapshot.docChanges().forEach(processSignal);
@@ -1036,51 +1514,50 @@
 
     function listenForPresence() {
       const membersList = document.getElementById('membersList');
-      
+
       onSnapshot(collection(db, 'family_presence'), (snapshot) => {
         membersList.innerHTML = '';
         const now = Date.now();
-        
+
         snapshot.forEach((docSnap) => {
           const data = docSnap.data();
           const uid = docSnap.id;
-          
-          // Clear dead feeds if someone closes the app
-                              if (!data.online || (now - data.lastSeen > 60000)) {
-                                onlineUids.delete(uid);
-                                if (reconnectTimers[uid]) {
-                                  clearTimeout(reconnectTimers[uid]);
-                                  delete reconnectTimers[uid];
-                                }
-                                delete reconnectAttempts[uid];
-                                cleanupPeer(uid);
-                      return;
-                    }
-          
-                    onlineUids.add(uid);
-                    const wasLive = agentPresenceStates[uid];
+
+          if (!data.online || (now - data.lastSeen > 60000)) {
+            onlineUids.delete(uid);
+            if (reconnectTimers[uid]) {
+              clearTimeout(reconnectTimers[uid]);
+              delete reconnectTimers[uid];
+            }
+            delete reconnectAttempts[uid];
+            cleanupPeer(uid);
+            return;
+          }
+
+          onlineUids.add(uid);
+          const wasLive = agentPresenceStates[uid];
           if (data.speaking && !wasLive && uid !== myUid) {
-             playConnectBeep();
+            playConnectBeep();
           }
           agentPresenceStates[uid] = data.speaking;
-          
+
           const li = document.createElement('li');
           const nameWrap = document.createElement('div');
           nameWrap.className = 'member-name';
-          
+
           const dot = document.createElement('span');
-                    dot.className = 'status-dot ' + (data.online ? 'connected' : 'error') + (data.speaking ? ' speaking' : '');
-                    nameWrap.appendChild(dot);
-                    
-                    const label = data.name;
-                    nameWrap.appendChild(document.createTextNode(label));
-                    li.appendChild(nameWrap);
-          
+          dot.className = 'status-dot ' + (data.online ? 'connected' : 'error') + (data.speaking ? ' speaking' : '');
+          nameWrap.appendChild(dot);
+
+          const peerHwInfo = data.hwSummary ? ` [${data.hwSummary}]` : '';
+          nameWrap.appendChild(document.createTextNode((data.name || 'NODE') + peerHwInfo));
+          li.appendChild(nameWrap);
+
           if (uid !== myUid) {
             const buzzBtn = document.createElement('button');
             buzzBtn.className = 'buzz-member-btn';
             buzzBtn.textContent = 'BUZZ';
-            
+
             const cooldownEnd = buzzCooldowns[uid];
             if (cooldownEnd && Date.now() < cooldownEnd) {
               buzzBtn.disabled = true;
@@ -1089,7 +1566,7 @@
             buzzBtn.onclick = () => sendBuzz(uid, buzzBtn);
             li.appendChild(buzzBtn);
           }
-          
+
           membersList.appendChild(li);
 
           if (uid !== myUid && myUid > uid) {
@@ -1129,7 +1606,7 @@
         let targetDocs = [];
         if (targetUid === 'all') {
           const snap = await getDocs(query(collection(db, 'family_push_subscriptions')));
-          snap.forEach(d => { if (d.id !== myUid) targetDocs.push(d.data().subscription) });
+          snap.forEach(d => { if (d.id !== myUid) targetDocs.push(d.data().subscription); });
         } else {
           const docSnap = await getDoc(doc(db, 'family_push_subscriptions', targetUid));
           if (docSnap.exists()) targetDocs.push(docSnap.data().subscription);
@@ -1144,116 +1621,114 @@
       } catch (e) {}
     }
 
-    // Auto-initialize when the app loads
-            window.addEventListener('DOMContentLoaded', async () => {
-              try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
-        
-              // 1. Reuse the camera/mic request already fired from the inline <head> script before
-              // Firebase even finished loading, instead of starting a brand new getUserMedia call here.
-              // Falls back to firing it fresh only if that early script somehow didn't run.
-              if (window.__earlyProfile) {
-                currentTier = window.__earlyTier;
-                currentProfile = window.__earlyProfile;
-              } else {
-                detectDeviceTier();
-              }
-              const mediaPromise = window.__earlyMediaPromise || navigator.mediaDevices.getUserMedia({ video: { width: { ideal: currentProfile.width }, height: { ideal: currentProfile.height }, frameRate: { ideal: currentProfile.frameRate, max: currentProfile.frameRate } }, audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate } })
-                .catch(() => navigator.mediaDevices.getUserMedia({ video: false, audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate } }))
-                .catch(() => null);
-        
-              // 2. The moment the stream is ready, show it. This is its own branch so it is never gated
-              // on the Firestore ID lookup below - a slow or cold Firestore connection can no longer
-              // delay when the camera appears.
-              const mediaReadyPromise = (async () => {
-                const mediaResult = await mediaPromise;
-                if (mediaResult) {
-                  localStream = mediaResult;
-                  hasMedia = true;
-                  if (localStream.getVideoTracks().length > 0) {
-                    localVideo.srcObject = localStream;
-                  }
-                } else {
-                  hasMedia = false;
-                }
-        
-                // Refine the quality tier in the background using the real screen refresh rate, without
-                // having delayed camera acquisition above for it.
-                refineDeviceTierInBackground();
-        
-                if (localStream) {
-                  localStream.getTracks().forEach(t => t.enabled = true);
-                  isCommsLive = true;
-                } else {
-                  isCommsLive = false;
-                }
-        
-                setupKeepAliveAudio();
-                updateMediaState();
-                updateVideoGrid(); // Init local scale
-              })();
-        
-              // 3. Fetch current users to determine the next ID - runs fully in parallel with the
-              // camera branch above; neither one waits on the other.
-              const idPromise = getDocs(collection(db, 'family_presence')).then((presenceSnap) => {
-                let maxId = 0;
-                const now = Date.now();
-                
-                presenceSnap.forEach((docSnap) => {
-                  const data = docSnap.data();
-                  if (data.online && (now - data.lastSeen < 60000) && data.name) {
-                    const num = parseInt(data.name);
-                    if (!isNaN(num) && num > maxId) {
-                      maxId = num;
-                    }
-                  }
-                });
-                
-                const nextIdNumber = maxId + 1;
-                myName = String(nextIdNumber).padStart(3, '0');
-                localStorage.setItem('myName', myName);
-                myIdInput.value = myName;
-        
-              }).catch((error) => {
-                console.error("Failed to assign ID, defaulting to 001", error);
-                myName = "001"; 
-                myIdInput.value = myName;
-              });
-        
-              // 4. Register Presence and enter channel once both branches above have settled - video
-              // display already happened without waiting for this.
-              await Promise.all([mediaReadyPromise, idPromise]);
-    
-          try {
+    window.addEventListener('DOMContentLoaded', async () => {
+      try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+
+      refreshHardwareTelemetryUI();
+
+      // Measure real display Hz in parallel
+      measureScreenRefreshRate().then((hz) => {
+        hwInfo.refreshRateHz = hz;
+        refreshHardwareTelemetryUI();
+      });
+
+      const mediaPromise = window.__earlyMediaPromise || navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'user' },
+          width: { ideal: currentProfile.width },
+          height: { ideal: currentProfile.height },
+          frameRate: { ideal: currentProfile.frameRate }
+        },
+        audio: { echoCancellation: true, noiseSuppression: true, sampleRate: currentProfile.audioSampleRate }
+      }).catch(() => null);
+
+      const mediaReadyPromise = (async () => {
+        const mediaResult = await mediaPromise;
+        if (mediaResult) {
+          localStream = mediaResult;
+          hasMedia = true;
+          if (localStream.getVideoTracks().length > 0) {
+            localVideo.srcObject = localStream;
+          }
+          await maximizeSensorAndProbeCapabilities();
+        } else {
+          hasMedia = false;
+        }
+
+        if (localStream) {
+          localStream.getTracks().forEach(t => t.enabled = true);
+          isCommsLive = true;
+        } else {
+          isCommsLive = false;
+        }
+
+        setupKeepAliveAudio();
+        updateMediaState();
+        updateVideoGrid();
+        refreshHardwareTelemetryUI();
+      })();
+
+      const idPromise = getDocs(collection(db, 'family_presence')).then((presenceSnap) => {
+        let maxId = 0;
+        const now = Date.now();
+
+        presenceSnap.forEach((docSnap) => {
+          const data = docSnap.data();
+          if (data.online && (now - data.lastSeen < 60000) && data.name) {
+            const num = parseInt(data.name);
+            if (!isNaN(num) && num > maxId) {
+              maxId = num;
+            }
+          }
+        });
+
+        const nextIdNumber = maxId + 1;
+        myName = String(nextIdNumber).padStart(3, '0');
+        localStorage.setItem('myName', myName);
+        myIdInput.value = myName;
+      }).catch(() => {
+        myName = "001";
+        myIdInput.value = myName;
+      });
+
+      await Promise.all([mediaReadyPromise, idPromise]);
+
+      try {
         await setDoc(doc(db, 'family_presence', myUid), {
           name: myName,
           online: true,
           speaking: isCommsLive,
           hasMic: hasMedia,
+          hwSummary: `${hwInfo.cores}C•${currentProfile.label}`,
           lastSeen: Date.now()
         });
         hasJoined = true;
-                
-                setInterval(() => {
-                    if (hasJoined) setDoc(doc(db, 'family_presence', myUid), { lastSeen: Date.now() }, { merge: true }).catch(()=>{});
-                }, 45000);
-        
-                subscribeToPush();
-                listenForSignals();
-                listenForPresence();
-                listenForBuzzes();
-                startAdaptiveMonitor();
+
+        setInterval(() => {
+          if (hasJoined) {
+            setDoc(doc(db, 'family_presence', myUid), {
+              lastSeen: Date.now(),
+              hwSummary: `${hwInfo.cores}C•${currentProfile.label}`
+            }, { merge: true }).catch(() => {});
+          }
+        }, 45000);
+
+        subscribeToPush();
+        listenForSignals();
+        listenForPresence();
+        listenForBuzzes();
+        startAdaptiveMonitor();
 
         const markOffline = () => {
-                  setDoc(doc(db, 'family_presence', myUid), { name: myName, online: false, speaking: false }, { merge: true }).catch(() => {});
-                };
-                window.addEventListener('beforeunload', markOffline);
-                window.addEventListener('pagehide', markOffline);
-        
-        if(isCommsLive) {
-           cutCallBtn.style.display = 'block';
-           acceptCallBtn.style.display = 'none';
+          setDoc(doc(db, 'family_presence', myUid), { name: myName, online: false, speaking: false }, { merge: true }).catch(() => {});
+        };
+        window.addEventListener('beforeunload', markOffline);
+        window.addEventListener('pagehide', markOffline);
+
+        if (isCommsLive) {
+          cutCallBtn.style.display = 'block';
+          acceptCallBtn.style.display = 'none';
         }
-        
       } catch (e) {
         statusText.textContent = "UPLINK FAILED. RETRY.";
       }
