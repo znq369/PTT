@@ -351,7 +351,7 @@
     #cutCallBtn { background: rgba(255,45,58,0.2); color: var(--accent-red); font-size: 1rem; display: none; border-color: var(--accent-red); }
     #cutCallBtn:hover { background: var(--accent-red); color: white; }
 
-    .fullscreen-video-container { position: fixed; top: 0; left: 0; z-index: 1; width: 100vw; height: calc(100vh - max(5vh, 54px)); background: #000; contain: strict; }
+    .fullscreen-video-container { position: fixed; top: 0; left: 0; z-index: 1; width: 100vw; height: 100vh; height: 100dvh; background: #000; contain: strict; }
     .video-grid { display: flex; flex-wrap: wrap; width: 100%; height: 100%; gap: 0; align-content: flex-start; }
     .video-wrapper { position: relative; border: 1px solid rgba(0,4,50,0.5); background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; contain: layout paint; }
     .video-wrapper.active { border-color: var(--text); }
@@ -438,6 +438,20 @@
     .buzz-member-btn { background: transparent; border: 1px solid var(--text); color: var(--text); padding: 0 0.5rem; font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; font-weight: 600; cursor: pointer; margin-left: 5px; height: 24px; border-radius: 2px; }
     .buzz-member-btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
     .buzz-member-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .buzz-member-btn { display: inline-flex; align-items: center; justify-content: center; }
+        .buzz-member-btn svg { display: block; }
+            .app { display: none !important; }
+                body > #screenShareBtn { position: fixed; left: 16px; bottom: 16px; z-index: 70; height: 40px; padding: 0 1rem; }
+                .pane-num { display: none !important; }
+                .pane-num .buzz-member-btn { display: none !important; }
+            .pane-num { position: absolute; right: 8px; bottom: 8px; z-index: 3; display: flex; align-items: center; gap: 6px; background: var(--accent-green); color: var(--bg); font-family: 'IBM Plex Mono', monospace; font-size: 0.95rem; font-weight: 600; padding: 3px 10px; border-radius: 4px; pointer-events: none; }
+            .pane-num .buzz-member-btn { margin-left: 0; height: 22px; border-color: var(--bg); color: var(--bg); pointer-events: auto; }
+            .pane-num .buzz-member-btn:hover:not(:disabled) { background: var(--bg); color: var(--text); }
+            body > #acceptCallBtn { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 70; height: 48px; padding: 0 2.2rem; font-size: 1.1rem; }
+            .members-list li { background: var(--accent-green); border-color: var(--accent-green); color: var(--bg); font-weight: 600; }
+            .members-list .status-dot { display: none; }
+            .members-list li .buzz-member-btn { border-color: var(--bg); color: var(--bg); }
+            .members-list li .buzz-member-btn:hover:not(:disabled) { background: var(--bg); color: var(--text); }
 
     body.incoming-buzz { animation: buzzFlash 1s ease-in-out infinite; }
     @keyframes buzzFlash { 0%, 100% { background: var(--bg); } 50% { background: var(--text); color: var(--bg); } }
@@ -469,6 +483,7 @@
     <div class="video-grid" id="videoGrid">
       <div class="video-wrapper" id="localVideoWrapper">
         <video id="localVideo" class="mirrored" autoplay playsinline muted></video>
+                <div class="pane-num" id="localPaneNum"><span class="pane-num-text"></span></div>
         <div class="video-label" id="localVideoLabel">
           <span>SELF</span>
           <span class="res-tag" id="localResTag">INIT...</span>
@@ -1084,6 +1099,7 @@
 
     const waveform = document.getElementById('waveform');
     const acceptCallBtn = document.getElementById('acceptCallBtn');
+        document.body.appendChild(acceptCallBtn);
     const cutCallBtn = document.getElementById('cutCallBtn');
     const statusText = document.getElementById('statusText');
     const myIdInput = document.getElementById('myIdInput');
@@ -1282,13 +1298,111 @@
           screenShareBtn.style.borderColor = '';
         }
     
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        var isMobileBrowser = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia || isMobileBrowser) {
           screenShareBtn.style.display = 'none';
         } else {
-          screenShareBtn.onclick = () => { if (screenTrack) stopScreenShare(); else startScreenShare(); };
+          document.body.appendChild(screenShareBtn);
+                screenShareBtn.onclick = () => { if (screenTrack) stopScreenShare(); else startScreenShare(); };
         }
     
-        function setupKeepAliveAudio() {
+        var tabHidden = false;
+            var mediaSuspended = false;
+            var resumeBusy = false;
+        
+            function setPeerTrack(pc, kind, track) {
+              var trs = pc.getTransceivers().filter(function (t) { return t.receiver && t.receiver.track && t.receiver.track.kind === kind && t.mid !== null; });
+              var tr = trs.find(function (t) { return t.currentDirection === 'sendrecv' || t.currentDirection === 'sendonly'; }) || trs[0];
+              if (!tr) return;
+              tr.sender.replaceTrack(track).then(function () { applySenderParameters(pc); }).catch(function () {});
+            }
+        
+            function suspendMediaForHiddenTab() {
+              tabHidden = true;
+              document.querySelectorAll('#videoGrid video:not(#localVideo)').forEach(function (v) { v.muted = true; });
+              if (!localStream || mediaSuspended) return;
+              var tracks = localStream.getTracks();
+              if (!tracks.length) return;
+              tracks.forEach(function (t) {
+                if (!(t.kind === 'video' && screenTrack)) {
+                  Object.values(peers).forEach(function (pc) { setPeerTrack(pc, t.kind, null); });
+                }
+                localStream.removeTrack(t);
+                try { t.stop(); } catch (e) {}
+              });
+              mediaSuspended = true;
+            }
+        
+            async function resumeMediaForVisibleTab() {
+              tabHidden = false;
+              updateMediaState();
+              if (!mediaSuspended || !localStream || resumeBusy) return;
+              resumeBusy = true;
+              var ms = null;
+              try {
+                try {
+                  ms = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                      facingMode: { ideal: 'user' },
+                      width: { ideal: currentProfile.width },
+                      height: { ideal: currentProfile.height },
+                      frameRate: { ideal: currentProfile.frameRate }
+                    },
+                    audio: {
+                      echoCancellation: window.__AUDIO_FX,
+                      noiseSuppression: window.__AUDIO_FX,
+                      autoGainControl: window.__AUDIO_FX,
+                      sampleRate: currentProfile.audioSampleRate,
+                      latency: 0.01
+                    }
+                  });
+                } catch (e1) {
+                  ms = await navigator.mediaDevices.getUserMedia({
+                    video: false,
+                    audio: { echoCancellation: window.__AUDIO_FX, noiseSuppression: window.__AUDIO_FX, sampleRate: currentProfile.audioSampleRate }
+                  });
+                }
+              } catch (e2) {
+                ms = null;
+              }
+              resumeBusy = false;
+              if (!ms) return;
+              if (tabHidden) {
+                ms.getTracks().forEach(function (t) { try { t.stop(); } catch (e3) {} });
+                return;
+              }
+              mediaSuspended = false;
+              ms.getTracks().forEach(function (t) {
+                t.enabled = isCommsLive;
+                localStream.addTrack(t);
+                if (!(t.kind === 'video' && screenTrack)) {
+                  Object.values(peers).forEach(function (pc) { setPeerTrack(pc, t.kind, t); });
+                }
+              });
+              if (!screenTrack) localVideo.srcObject = localStream;
+              await configureLocalTrackForZeroLag();
+            }
+        
+            document.addEventListener('visibilitychange', function () {
+              if (document.hidden) suspendMediaForHiddenTab(); else resumeMediaForVisibleTab();
+            });
+        
+            var DIAL_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>';
+                var peerNames = {};
+            
+                function fmtNode(n) {
+                  return /^\d+$/.test(String(n)) ? String(parseInt(n, 10)) : (n || 'NODE');
+                }
+            
+                function refreshPaneNumbers() {
+                  Object.keys(peerNames).forEach(function (uid) {
+                    var w = document.getElementById(uid === myUid ? 'localVideoWrapper' : 'video-wrapper-' + uid);
+                    var t = w && w.querySelector('.pane-num-text');
+                    if (t) t.textContent = fmtNode(peerNames[uid]);
+                  });
+                }
+            
+                function setupKeepAliveAudio() {
       if (!keepAliveAudio) {
         keepAliveAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
         keepAliveAudio.loop = true;
@@ -1349,7 +1463,7 @@
 
       const remoteVideos = document.querySelectorAll('#videoGrid video:not(#localVideo)');
       remoteVideos.forEach(v => {
-        if (isCommsLive) {
+              if (isCommsLive && !tabHidden) {
           v.muted = true;
           v.play().then(() => { v.muted = false; }).catch(() => {});
         } else {
@@ -1523,7 +1637,7 @@
       if (buzzCooldowns[targetUid] && now < buzzCooldowns[targetUid]) return;
       buzzCooldowns[targetUid] = now + BUZZ_COOLDOWN_MS;
 
-      const originalText = btnEl ? btnEl.textContent : null;
+      const originalText = btnEl ? btnEl.innerHTML : null;
       if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'TX..'; }
 
       if (!isCommsLive) {
@@ -1551,7 +1665,7 @@
       relayPushBuzz(targetUid);
 
       if (btnEl) {
-        setTimeout(() => { btnEl.disabled = false; btnEl.textContent = originalText; }, BUZZ_COOLDOWN_MS);
+        setTimeout(() => { btnEl.disabled = false; btnEl.innerHTML = originalText; }, BUZZ_COOLDOWN_MS);
       }
     }
 
@@ -1618,6 +1732,19 @@
 
           wrapper.appendChild(vid);
           wrapper.appendChild(label);
+                    var paneNum = document.createElement('div');
+                    paneNum.className = 'pane-num';
+                    var paneNumText = document.createElement('span');
+                    paneNumText.className = 'pane-num-text';
+                    var paneBuzz = document.createElement('button');
+                    paneBuzz.className = 'buzz-member-btn';
+                    paneBuzz.title = 'BUZZ';
+                    paneBuzz.innerHTML = DIAL_SVG;
+                    paneBuzz.onclick = () => sendBuzz(targetUid, paneBuzz);
+                    paneNum.appendChild(paneNumText);
+                    paneNum.appendChild(paneBuzz);
+                    wrapper.appendChild(paneNum);
+                    refreshPaneNumbers();
           document.getElementById('videoGrid').appendChild(wrapper);
           updateVideoGrid();
         }
@@ -1629,7 +1756,7 @@
                 wrapper.classList.toggle('screen-share', !!peerSharing[targetUid]);
         videoEl.muted = true;
         videoEl.play().then(() => {
-          videoEl.muted = !isCommsLive;
+          videoEl.muted = !isCommsLive || tabHidden;
         }).catch(() => {});
       };
 
@@ -1643,7 +1770,8 @@
         const state = pc.connectionState;
         if (state === 'connected') {
           reconnectAttempts[targetUid] = 0;
-                    if (screenTrack) setPeerVideoTrack(pc, screenTrack);
+                    if (localStream) localStream.getTracks().forEach(function (t) { if (!pc.getSenders().some(function (s) { return s.track === t; })) setPeerTrack(pc, t.kind, t); });
+                              if (screenTrack) setPeerVideoTrack(pc, screenTrack);
           applySenderParameters(pc);
           if (reconnectTimers[targetUid]) {
             clearTimeout(reconnectTimers[targetUid]);
@@ -1756,6 +1884,7 @@
             playConnectBeep();
           }
           agentPresenceStates[uid] = data.speaking;
+                    peerNames[uid] = data.name;
                     peerSharing[uid] = !!data.sharing;
                     var peerWrap = document.getElementById('video-wrapper-' + uid);
                     if (peerWrap) peerWrap.classList.toggle('screen-share', peerSharing[uid]);
@@ -1769,13 +1898,14 @@
           nameWrap.appendChild(dot);
 
           const peerHwInfo = '';
-          nameWrap.appendChild(document.createTextNode((data.name || 'NODE') + peerHwInfo));
+          nameWrap.appendChild(document.createTextNode((/^\d+$/.test(String(data.name)) ? String(parseInt(data.name, 10)) : (data.name || 'NODE')) + peerHwInfo));
           li.appendChild(nameWrap);
 
           if (uid !== myUid) {
             const buzzBtn = document.createElement('button');
             buzzBtn.className = 'buzz-member-btn';
-            buzzBtn.textContent = 'BUZZ';
+            buzzBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>';
+                        buzzBtn.title = 'BUZZ';
 
             const cooldownEnd = buzzCooldowns[uid];
             if (cooldownEnd && Date.now() < cooldownEnd) {
@@ -1795,7 +1925,8 @@
           }
         });
 
-        // Clean up any peer that disappeared completely from the RTDB tree
+        refreshPaneNumbers();
+                // Clean up any peer that disappeared completely from the RTDB tree
         Array.from(onlineUids).forEach((uid) => {
           if (!seenInSnapshot.has(uid)) {
             onlineUids.delete(uid);
@@ -1998,14 +2129,4 @@
     });
   </script>
 </body>
-</html>
-
-=== SESSION CHANGES (patches applied since this file was loaded) ===
-16:03 L358 @part4 (+1 lines): .video-wrapper.active { border-color: var(--text); }
-16:03 L1515 @part23 (+0 lines): try { pc.addTransceiver('video', { direction: 'sendrecv' }); } catch (
-16:03 L1572 @part23 (+1 lines): reconnectAttempts[targetUid] = 0;
-16:03 L1555 @part23 (+3 lines): var remoteMs = videoEl.srcObject instanceof MediaStream ? videoEl.srcO
-16:03 L1688 @part25 (+3 lines): agentPresenceStates[uid] = data.speaking;
-16:03 L1113 @part15 (+1 lines): async function switchCamera() {
-16:03 L1275 @part18 (+1 lines): window.__pauseBgCanvas = isCommsLive;
-16:03 L1222 @part16 (+69 lines): const screenShareBtn = document.getElementById('screenShareBtn');​​​
+</html>​​​
