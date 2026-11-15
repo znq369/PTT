@@ -919,10 +919,12 @@
     function startAdaptiveMonitor() {
       setInterval(async () => {
         let cpuOrBandwidthLimited = false;
+                var connectedPeers = 0;
 
         for (const uid in peers) {
           const pc = peers[uid];
           if (!pc || pc.connectionState !== 'connected') continue;
+                    connectedPeers++;
           try {
             const stats = await pc.getStats();
             stats.forEach((report) => {
@@ -936,7 +938,10 @@
                   cpuOrBandwidthLimited = true;
                 }
               }
-              if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.kind === 'audio')) {
+              if (report.type === 'remote-inbound-rtp' && report.kind === 'video' && typeof report.fractionLost === 'number' && report.fractionLost > 0.08) {
+                              cpuOrBandwidthLimited = true;
+                            }
+                            if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.kind === 'audio')) {
                 if (typeof report.jitter === 'number') {
                   hwInfo.jitterMs = Math.round(report.jitter * 1000);
                   if (report.kind === 'video') hwInfo.videoJitterMs = hwInfo.jitterMs; else hwInfo.audioJitterMs = hwInfo.jitterMs;
@@ -981,15 +986,26 @@
 
         if (cpuOrBandwidthLimited) {
           congestionStrikes++;
+                    cleanStrikes = 0;
           if (congestionStrikes >= 2 && currentTier !== 'low') {
             congestionStrikes = 0;
             const order = ['ultra', 'high', 'medium', 'low'];
             const nextIdx = Math.min(order.length - 1, order.indexOf(currentTier) + 1);
             await applyTierProfile(order[nextIdx], 'auto');
+                        cleanStrikes = 0;
+                        cleanNeeded = Math.min(40, cleanNeeded * 2);
           }
         } else {
-          congestionStrikes = 0;
-        }
+                  congestionStrikes = 0;
+                  if (connectedPeers > 0) cleanStrikes++;
+                  if (cleanStrikes >= cleanNeeded) {
+                    cleanStrikes = 0;
+                    var upIdx = TIER_ORDER.indexOf(currentTier) - 1;
+                    if (upIdx >= 0 && upIdx >= TIER_ORDER.indexOf(hwInfo.autoRecommendedTier || 'ultra')) {
+                      await applyTierProfile(TIER_ORDER[upIdx], 'auto');
+                    }
+                  }
+                }
       }, 3000);
     }
 
@@ -1402,7 +1418,36 @@
                   });
                 }
             
-                function setupKeepAliveAudio() {
+                var TIER_ORDER = ['ultra', 'high', 'medium', 'low'];
+                    var cleanStrikes = 0;
+                    var cleanNeeded = 10;
+                
+                    function computeCeilingTier() {
+                      var c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+                      var s = hwInfo.score || 0;
+                      var t = s >= 75 ? 'ultra' : (s >= 56 ? 'high' : (s >= 40 ? 'medium' : 'low'));
+                      var net = c && c.effectiveType ? c.effectiveType : '4g';
+                      var dl = c && typeof c.downlink === 'number' ? c.downlink : 10;
+                      var rt = c && typeof c.rtt === 'number' ? c.rtt : 45;
+                      if (t === 'ultra' && !(rt <= 60 && dl >= 10)) t = 'high';
+                      if ((c && c.saveData) || net === '2g' || net === 'slow-2g') t = 'low';
+                      else if (net === '3g' && TIER_ORDER.indexOf(t) < TIER_ORDER.indexOf('medium')) t = 'medium';
+                      return t;
+                    }
+                
+                    (function () {
+                      var c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+                      if (!c || !c.addEventListener) return;
+                      c.addEventListener('change', function () {
+                        var ceil = computeCeilingTier();
+                        hwInfo.autoRecommendedTier = ceil;
+                        cleanStrikes = 0;
+                        if (qualityMode !== 'auto') return;
+                        if (TIER_ORDER.indexOf(currentTier) < TIER_ORDER.indexOf(ceil)) applyTierProfile(ceil, 'auto');
+                      });
+                    })();
+                
+                    function setupKeepAliveAudio() {
       if (!keepAliveAudio) {
         keepAliveAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
         keepAliveAudio.loop = true;
@@ -2129,4 +2174,13 @@
     });
   </script>
 </body>
-</html>​​​
+</html>
+
+=== SESSION CHANGES (patches applied since this file was loaded) ===
+17:00 L922 @part12 (+1 lines): let cpuOrBandwidthLimited = false;
+17:00 L927 @part12 (+1 lines): if (!pc || pc.connectionState !== 'connected') continue;
+17:00 L941 @part12 (+3 lines): if (report.type === 'remote-inbound-rtp' && report.kind === 'video' &&
+17:00 L989 @part12 (+1 lines): congestionStrikes++;
+17:00 L995 @part12 (+2 lines): await applyTierProfile(order[nextIdx], 'auto');
+17:00 L999 @part12 (+8 lines): } else {
+17:00 L1421 @part20 (+29 lines): var TIER_ORDER = ['ultra', 'high', 'medium', 'low'];​​​
