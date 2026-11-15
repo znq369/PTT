@@ -285,6 +285,7 @@
       border-top: 1px solid var(--border);
     }
     .app::-webkit-scrollbar { height: 4px; }
+        .video-label, .hw-hud-btn, .status-bar, .waveform, #cutCallBtn { display: none !important; }
     .app::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); }
 
     .header { display: flex; align-items: center; gap: 1rem; padding: 0; flex-shrink: 0; }
@@ -305,6 +306,7 @@
       text-transform: uppercase;
     }
     .big-id-input:focus { border-bottom-color: var(--text); }
+        .header, #myIdInput { display: none !important; }
 
     .card { background: transparent; border: none; padding: 0; display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; height: 100%; }
 
@@ -1505,9 +1507,16 @@
           pc.addTrack(track, localStream);
         });
         applySenderParameters(pc);
-      }
-
-      pc.ontrack = (event) => {
+              }
+        
+              if (!localStream || localStream.getVideoTracks().length === 0) {
+                try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch (e) {}
+              }
+              if (!localStream || localStream.getAudioTracks().length === 0) {
+                try { pc.addTransceiver('audio', { direction: 'recvonly' }); } catch (e) {}
+              }
+        
+              pc.ontrack = (event) => {
         applyCellularMicroBufferToReceiver(event.receiver, event.track.kind);
 
         let wrapper = document.getElementById('video-wrapper-' + targetUid);
@@ -1679,7 +1688,7 @@
           dot.className = 'status-dot ' + (data.online ? 'connected' : 'error') + (data.speaking ? ' speaking' : '');
           nameWrap.appendChild(dot);
 
-          const peerHwInfo = data.hwSummary ? ` [${data.hwSummary}]` : '';
+          const peerHwInfo = '';
           nameWrap.appendChild(document.createTextNode((data.name || 'NODE') + peerHwInfo));
           li.appendChild(nameWrap);
 
@@ -1782,15 +1791,18 @@
         refreshHardwareTelemetryUI();
       });
 
-      const mediaPromise = window.__earlyMediaPromise || navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'user' },
-          width: { ideal: currentProfile.width },
-          height: { ideal: currentProfile.height },
-          frameRate: { ideal: currentProfile.frameRate }
-        },
-        audio: { echoCancellation: window.__AUDIO_FX, noiseSuppression: window.__AUDIO_FX, sampleRate: currentProfile.audioSampleRate, latency: 0.01 }
-      }).catch(() => null);
+      const mediaPromise = (window.__earlyMediaPromise || navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: { ideal: 'user' },
+                width: { ideal: currentProfile.width },
+                height: { ideal: currentProfile.height },
+                frameRate: { ideal: currentProfile.frameRate }
+              },
+              audio: { echoCancellation: window.__AUDIO_FX, noiseSuppression: window.__AUDIO_FX, sampleRate: currentProfile.audioSampleRate, latency: 0.01 }
+            })).catch(() => null).then((full) => full || navigator.mediaDevices.getUserMedia({
+              video: false,
+              audio: { echoCancellation: window.__AUDIO_FX, noiseSuppression: window.__AUDIO_FX, sampleRate: currentProfile.audioSampleRate, latency: 0.01 }
+            }).catch(() => null));
 
       const mediaReadyPromise = (async () => {
         const mediaResult = await mediaPromise;
@@ -1907,3 +1919,10 @@
   </script>
 </body>
 </html>
+
+=== SESSION CHANGES (patches applied since this file was loaded) ===
+15:54 L288 @part4 (+1 lines): .app::-webkit-scrollbar { height: 4px; }
+15:54 L1683 @part25 (+0 lines): const peerHwInfo = '';
+15:55 L309 @part4 (+1 lines): .big-id-input:focus { border-bottom-color: var(--text); }
+15:57 L1787 @part26 (+3 lines): const mediaPromise = (window.__earlyMediaPromise || navigator.mediaDev
+15:57 L1510 @part23 (+7 lines): applySenderParameters(pc);​​​
