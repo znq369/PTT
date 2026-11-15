@@ -355,6 +355,7 @@
     .video-grid { display: flex; flex-wrap: wrap; width: 100%; height: 100%; gap: 0; align-content: flex-start; }
     .video-wrapper { position: relative; border: 1px solid rgba(0,4,50,0.5); background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; contain: layout paint; }
     .video-wrapper.active { border-color: var(--text); }
+        .video-wrapper.screen-share video { object-fit: contain; }
     .video-wrapper video { width: 100%; height: 100%; object-fit: cover; transform: translateZ(0); will-change: transform; }
     .video-wrapper video.mirrored { transform: scaleX(-1) translateZ(0); }
     .video-label { position: absolute; bottom: 8px; left: 8px; background: rgba(0, 4, 50, 0.88); border: 1px solid var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; padding: 4px 8px; color: var(--text); z-index: 2; text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
@@ -546,6 +547,7 @@
         </div>
         <button id="acceptCallBtn" class="btn">ACCEPT</button>
         <button id="cutCallBtn" class="btn">MUTE</button>
+                <button id="screenShareBtn" class="btn" title="SHARE SCREEN">SHARE SCREEN</button>
         <button id="buzzAllBtn" class="btn" title="GLOBAL BUZZ" style="padding: 0 1rem; display: none;">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 17H2c0-1.5 1.5-2.5 1.5-2.5V10a8.5 8.5 0 0 1 17 0v4.5S22 15.5 22 17z"></path>
@@ -1108,6 +1110,7 @@
     window.addEventListener('resize', updateVideoGrid);
 
     async function switchCamera() {
+          if (screenTrack) return;
       if (!localStream) return;
       await getVideoDevices();
       if (videoDevices.length < 2) return;
@@ -1216,7 +1219,76 @@
       }
     });
 
-    function setupKeepAliveAudio() {
+    const screenShareBtn = document.getElementById('screenShareBtn');
+        var screenStream = null;
+        var screenTrack = null;
+        var screenWasMirrored = true;
+        var peerSharing = {};
+    
+        function setPeerVideoTrack(pc, track) {
+          var trs = pc.getTransceivers().filter((t) => t.receiver && t.receiver.track && t.receiver.track.kind === 'video' && t.mid !== null);
+          var tr = trs.find((t) => t.currentDirection === 'sendrecv' || t.currentDirection === 'sendonly') || trs[0];
+          if (!tr) return;
+          tr.sender.replaceTrack(track).then(() => applySenderParameters(pc)).catch(() => {});
+        }
+    
+        function setSharingFlag(on) {
+          var lw = document.getElementById('localVideoWrapper');
+          if (lw) lw.classList.toggle('screen-share', on);
+          if (hasJoined) {
+            update(ref(rtdb, 'family_presence/' + myUid), { sharing: on, lastSeen: Date.now() }).catch(() => {});
+          }
+        }
+    
+        async function startScreenShare() {
+          if (screenTrack || !isCommsLive) return;
+          try {
+            screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30 } }, audio: false });
+          } catch (e) {
+            screenStream = null;
+            return;
+          }
+          screenTrack = screenStream.getVideoTracks()[0] || null;
+          if (!screenTrack) {
+            screenStream.getTracks().forEach((t) => t.stop());
+            screenStream = null;
+            return;
+          }
+          try { if ('contentHint' in screenTrack) screenTrack.contentHint = 'detail'; } catch (e) {}
+          screenTrack.addEventListener('ended', stopScreenShare);
+          Object.values(peers).forEach((pc) => setPeerVideoTrack(pc, screenTrack));
+          screenWasMirrored = localVideo.classList.contains('mirrored');
+          localVideo.classList.remove('mirrored');
+          localVideo.srcObject = screenStream;
+          setSharingFlag(true);
+          screenShareBtn.textContent = 'STOP SHARING';
+          screenShareBtn.style.color = 'var(--accent-red)';
+          screenShareBtn.style.borderColor = 'var(--accent-red)';
+        }
+    
+        function stopScreenShare() {
+          if (!screenTrack && !screenStream) return;
+          var st = screenStream;
+          screenStream = null;
+          screenTrack = null;
+          if (st) st.getTracks().forEach((t) => { try { t.stop(); } catch (e) {} });
+          var cam = localStream ? (localStream.getVideoTracks()[0] || null) : null;
+          Object.values(peers).forEach((pc) => setPeerVideoTrack(pc, cam));
+          localVideo.srcObject = localStream;
+          localVideo.classList.toggle('mirrored', screenWasMirrored);
+          setSharingFlag(false);
+          screenShareBtn.textContent = 'SHARE SCREEN';
+          screenShareBtn.style.color = '';
+          screenShareBtn.style.borderColor = '';
+        }
+    
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+          screenShareBtn.style.display = 'none';
+        } else {
+          screenShareBtn.onclick = () => { if (screenTrack) stopScreenShare(); else startScreenShare(); };
+        }
+    
+        function setupKeepAliveAudio() {
       if (!keepAliveAudio) {
         keepAliveAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
         keepAliveAudio.loop = true;
@@ -1269,6 +1341,7 @@
 
     function updateMediaState() {
       window.__pauseBgCanvas = isCommsLive;
+            if (!isCommsLive && screenTrack) stopScreenShare();
 
       if (localStream) {
         localStream.getTracks().forEach(t => t.enabled = isCommsLive);
@@ -1510,7 +1583,7 @@
               }
         
               if (!localStream || localStream.getVideoTracks().length === 0) {
-                try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch (e) {}
+                try { pc.addTransceiver('video', { direction: 'sendrecv' }); } catch (e) {}
               }
               if (!localStream || localStream.getAudioTracks().length === 0) {
                 try { pc.addTransceiver('audio', { direction: 'recvonly' }); } catch (e) {}
@@ -1550,7 +1623,10 @@
         }
 
         const videoEl = document.getElementById('video-' + targetUid);
-        videoEl.srcObject = event.streams[0];
+        var remoteMs = videoEl.srcObject instanceof MediaStream ? videoEl.srcObject : new MediaStream();
+                if (remoteMs.getTracks().indexOf(event.track) === -1) remoteMs.addTrack(event.track);
+                if (videoEl.srcObject !== remoteMs) videoEl.srcObject = remoteMs;
+                wrapper.classList.toggle('screen-share', !!peerSharing[targetUid]);
         videoEl.muted = true;
         videoEl.play().then(() => {
           videoEl.muted = !isCommsLive;
@@ -1567,6 +1643,7 @@
         const state = pc.connectionState;
         if (state === 'connected') {
           reconnectAttempts[targetUid] = 0;
+                    if (screenTrack) setPeerVideoTrack(pc, screenTrack);
           applySenderParameters(pc);
           if (reconnectTimers[targetUid]) {
             clearTimeout(reconnectTimers[targetUid]);
@@ -1679,6 +1756,9 @@
             playConnectBeep();
           }
           agentPresenceStates[uid] = data.speaking;
+                    peerSharing[uid] = !!data.sharing;
+                    var peerWrap = document.getElementById('video-wrapper-' + uid);
+                    if (peerWrap) peerWrap.classList.toggle('screen-share', peerSharing[uid]);
 
           const li = document.createElement('li');
           const nameWrap = document.createElement('div');
@@ -1921,8 +2001,11 @@
 </html>
 
 === SESSION CHANGES (patches applied since this file was loaded) ===
-15:54 L288 @part4 (+1 lines): .app::-webkit-scrollbar { height: 4px; }
-15:54 L1683 @part25 (+0 lines): const peerHwInfo = '';
-15:55 L309 @part4 (+1 lines): .big-id-input:focus { border-bottom-color: var(--text); }
-15:57 L1787 @part26 (+3 lines): const mediaPromise = (window.__earlyMediaPromise || navigator.mediaDev
-15:57 L1510 @part23 (+7 lines): applySenderParameters(pc);​​​
+16:03 L358 @part4 (+1 lines): .video-wrapper.active { border-color: var(--text); }
+16:03 L1515 @part23 (+0 lines): try { pc.addTransceiver('video', { direction: 'sendrecv' }); } catch (
+16:03 L1572 @part23 (+1 lines): reconnectAttempts[targetUid] = 0;
+16:03 L1555 @part23 (+3 lines): var remoteMs = videoEl.srcObject instanceof MediaStream ? videoEl.srcO
+16:03 L1688 @part25 (+3 lines): agentPresenceStates[uid] = data.speaking;
+16:03 L1113 @part15 (+1 lines): async function switchCamera() {
+16:03 L1275 @part18 (+1 lines): window.__pauseBgCanvas = isCommsLive;
+16:03 L1222 @part16 (+69 lines): const screenShareBtn = document.getElementById('screenShareBtn');​​​
